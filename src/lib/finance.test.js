@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   formatMinorAmount,
+  getHouseholdMonthSummaryV2,
   getMonthSummary,
   parseAmountToMinor,
   validateTransaction,
 } from "./finance.js";
+import { createInitialHouseholdDataV2 } from "./storage.js";
 
 const categories = [
   { id: "salary", kind: "income", name: "Salario" },
@@ -94,6 +96,207 @@ describe("getMonthSummary", () => {
         "2026-10",
       ),
     ).toThrow(RangeError);
+  });
+});
+
+describe("getHouseholdMonthSummaryV2", () => {
+  it("calculates member availability, shared cent allocation, and external payer exclusion", () => {
+    const householdData = createInitialHouseholdDataV2("EUR");
+    householdData.incomeEntries.push(
+      {
+        id: "income-lisandro",
+        memberId: "lisandro",
+        date: "2026-10-01",
+        description: "Sueldo Lisandro",
+        amountMinor: 200000,
+        categoryId: "income-other",
+      },
+      {
+        id: "income-catriel",
+        memberId: "catriel",
+        date: "2026-10-02",
+        description: "Sueldo Catriel",
+        amountMinor: 100000,
+        categoryId: "income-other",
+      },
+    );
+    householdData.paymentPlans.push(
+      {
+        id: "personal-lisandro",
+        description: "Pago personal",
+        categoryId: "payment-other",
+        responsibility: "lisandro",
+        buyerMemberId: "lisandro",
+        cardName: null,
+        payer: { kind: "member", memberId: "catriel" },
+        installments: [
+          {
+            id: "installment-personal",
+            number: 1,
+            total: 1,
+            dueDate: "2026-10-04",
+            amountMinor: 5050,
+            status: "paid",
+          },
+        ],
+      },
+      {
+        id: "shared-plan",
+        description: "Compartido impar",
+        categoryId: "payment-other",
+        responsibility: "shared",
+        buyerMemberId: "catriel",
+        cardName: "Nación Visa",
+        payer: { kind: "member", memberId: "lisandro" },
+        installments: [
+          {
+            id: "installment-shared",
+            number: 1,
+            total: 1,
+            dueDate: "2026-10-10",
+            amountMinor: 101,
+            status: "pending",
+          },
+        ],
+      },
+      {
+        id: "external-plan",
+        description: "Paga un externo",
+        categoryId: "payment-other",
+        responsibility: "shared",
+        buyerMemberId: "lisandro",
+        cardName: "Nación MasterCard",
+        payer: { kind: "external", name: "Padres" },
+        installments: [
+          {
+            id: "installment-external",
+            number: 1,
+            total: 1,
+            dueDate: "2026-10-15",
+            amountMinor: 300,
+            status: "pending",
+          },
+        ],
+      },
+      {
+        id: "next-month-plan",
+        description: "Próximo mes",
+        categoryId: "payment-other",
+        responsibility: "lisandro",
+        buyerMemberId: "lisandro",
+        cardName: null,
+        payer: { kind: "member", memberId: "lisandro" },
+        installments: [
+          {
+            id: "installment-next-month",
+            number: 1,
+            total: 1,
+            dueDate: "2026-11-01",
+            amountMinor: 9900,
+            status: "pending",
+          },
+        ],
+      },
+    );
+
+    const summary = getHouseholdMonthSummaryV2(householdData, "2026-10");
+
+    expect(summary).toMatchObject({
+      incomeMinor: 300000,
+      householdPaymentsMinor: 5151,
+      sharedHouseholdPaymentsMinor: 101,
+      sharedCommitmentsMinor: 401,
+      externalPaymentsMinor: 300,
+      availableMinor: 294849,
+      members: {
+        lisandro: {
+          incomeMinor: 200000,
+          personalPaymentsMinor: 5050,
+          sharedPaymentsMinor: 50,
+          paymentsMinor: 5100,
+          availableMinor: 194900,
+        },
+        catriel: {
+          incomeMinor: 100000,
+          personalPaymentsMinor: 0,
+          sharedPaymentsMinor: 51,
+          paymentsMinor: 51,
+          availableMinor: 99949,
+        },
+      },
+    });
+  });
+
+  it("counts paid and pending installments equally and filters by due month", () => {
+    const householdData = createInitialHouseholdDataV2("EUR");
+    householdData.incomeEntries.push({
+      id: "income-1",
+      memberId: "lisandro",
+      date: "2026-10-01",
+      description: "Sueldo",
+      amountMinor: 50000,
+      categoryId: "income-other",
+    });
+    householdData.paymentPlans.push({
+      id: "plan-1",
+      description: "Dos cuotas",
+      categoryId: "payment-other",
+      responsibility: "lisandro",
+      buyerMemberId: "lisandro",
+      cardName: null,
+      payer: { kind: "member", memberId: "lisandro" },
+      installments: [
+        {
+          id: "installment-october",
+          number: 1,
+          total: 2,
+          dueDate: "2026-10-01",
+          amountMinor: 10000,
+          status: "pending",
+        },
+        {
+          id: "installment-november",
+          number: 2,
+          total: 2,
+          dueDate: "2026-11-01",
+          amountMinor: 10000,
+          status: "paid",
+        },
+      ],
+    });
+
+    expect(getHouseholdMonthSummaryV2(householdData, "2026-10").members.lisandro.availableMinor).toBe(
+      40000,
+    );
+    expect(getHouseholdMonthSummaryV2(householdData, "2026-11").members.lisandro.availableMinor).toBe(
+      -10000,
+    );
+  });
+
+  it("rejects invalid month keys, entries, and unsafe monthly totals", () => {
+    const householdData = createInitialHouseholdDataV2("EUR");
+
+    expect(() => getHouseholdMonthSummaryV2(householdData, "2026-13")).toThrow(RangeError);
+    householdData.incomeEntries.push(
+      {
+        id: "income-1",
+        memberId: "lisandro",
+        date: "2026-10-01",
+        description: "Sueldo",
+        amountMinor: Number.MAX_SAFE_INTEGER,
+        categoryId: "income-other",
+      },
+      {
+        id: "income-2",
+        memberId: "catriel",
+        date: "2026-10-02",
+        description: "Sueldo",
+        amountMinor: 1,
+        categoryId: "income-other",
+      },
+    );
+
+    expect(() => getHouseholdMonthSummaryV2(householdData, "2026-10")).toThrow(RangeError);
   });
 });
 

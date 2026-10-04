@@ -866,3 +866,371 @@ h2 {
     min-width: 125px;
   }
 }
+
+.household-workspace {
+  padding-top: 38px;
+}
+
+.household-heading {
+  align-items: flex-end;
+}
+
+.household-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.household-grid {
+  display: grid;
+  grid-template-areas: "lisandro shared catriel";
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 0;
+  margin-top: 31px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: rgb(255 255 255 / 55%);
+}
+
+.household-panel {
+  min-width: 0;
+  padding: 0 17px 18px;
+  border-top: 3px solid #6d9c7a;
+  animation: panel-arrive 300ms ease-out both;
+}
+
+.lisandro-panel {
+  grid-area: lisandro;
+}
+
+.shared-panel {
+  grid-area: shared;
+  border-top-color: var(--gold);
+  border-right: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  animation-delay: 60ms;
+}
+
+.catriel-panel {
+  grid-area: catriel;
+  border-top-color: var(--coral);
+  animation-delay: 120ms;
+}
+
+@keyframes panel-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.household-panel-header {
+  padding: 20px 0 17px;
+  border-bottom: 1px solid var(--line);
+}
+
+.household-panel-header .eyebrow {
+  margin-bottom: 8px;
+}
+
+.household-panel-header h2 {
+  font-size: 24px;
+}
+
+.available-readout {
+  display: grid;
+  gap: 5px;
+  margin-top: 18px;
+}
+
+.available-readout span,
+.member-stats span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.available-readout strong {
+  color: var(--green);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 27px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.member-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 13px 0 4px;
+}
+
+.member-stats > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.member-stats strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-section {
+  margin-top: 17px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.panel-section-heading {
+  display: flex;
+  min-height: 31px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.panel-section-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.panel-entry-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.income-entry,
+.payment-entry {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 7px 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.entry-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.entry-copy strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.entry-copy > span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.income-value,
+.payment-value {
+  color: var(--ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.income-value {
+  color: var(--green);
+}
+
+.payment-value {
+  color: var(--coral);
+}
+
+.entry-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px 12px;
+}
+
+.entry-actions .text-button {
+  font-size: 11px;
+}
+
+.payment-entry-title {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 8px;
+}
+
+.payment-entry-title strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.status-pill {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.status-pill.pending {
+  background: #f8efe0;
+  color: #805a1c;
+}
+
+.status-pill.paid {
+  background: var(--green-wash);
+  color: var(--green);
+}
+
+.panel-empty {
+  margin: 6px 0 0;
+  padding: 11px 0 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.shared-panel-header {
+  padding-inline: 2px;
+}
+
+.shared-total strong {
+  color: var(--gold);
+}
+
+.shared-rule {
+  margin: 10px 0 0;
+  color: #79602a;
+  font-size: 11px;
+}
+
+.shared-payment-section {
+  padding-inline: 2px;
+}
+
+.member-balance-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.member-balance-grid .balance-editor {
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 1.2fr);
+  gap: 10px;
+  padding: 10px;
+}
+
+.member-balance-grid .balance-current .eyebrow {
+  margin-bottom: 5px;
+  font-size: 9px;
+}
+
+.member-balance-grid .balance-current strong {
+  font-size: 16px;
+}
+
+.member-balance-grid .balance-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+}
+
+.member-balance-grid .field {
+  gap: 4px;
+  font-size: 10px;
+}
+
+.member-balance-grid .field input {
+  height: 35px;
+  padding-inline: 7px;
+  font-size: 12px;
+}
+
+.member-balance-grid .secondary-button {
+  min-height: 35px;
+  padding-inline: 8px;
+  font-size: 11px;
+}
+
+.payment-installments-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 980px) and (min-width: 681px) {
+  .household-grid {
+    grid-template-areas:
+      "lisandro catriel"
+      "shared shared";
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 24px;
+  }
+
+  .shared-panel {
+    border-right: 0;
+    border-left: 0;
+  }
+}
+
+@media (max-width: 680px) {
+  .household-workspace {
+    padding-top: 32px;
+  }
+
+  .household-grid {
+    grid-template-areas:
+      "lisandro"
+      "shared"
+      "catriel";
+    grid-template-columns: minmax(0, 1fr);
+    margin-top: 22px;
+  }
+
+  .household-panel {
+    padding-inline: 15px;
+  }
+
+  .shared-panel {
+    border-right: 0;
+    border-left: 0;
+  }
+
+  .household-panel-header {
+    padding-top: 16px;
+  }
+
+  .payment-installments-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .payment-installments-row .field:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 380px) {
+  .member-balance-grid .balance-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import {
   formatMinorAmount,
+  getHouseholdMonthSummaryV2,
   getMonthSummary,
   parseAmountToMinor,
   validateTransaction,
 } from "./lib/finance.js";
-import { parseFinanceBackup, serializeFinanceBackup } from "./lib/backup.js";
-import { loadFinanceData, saveFinanceData } from "./lib/storage.js";
+import {
+  parseFinanceBackup,
+  parseHouseholdBackupV2,
+  serializeFinanceBackup,
+  serializeHouseholdBackupV2,
+} from "./lib/backup.js";
+import { cancelPaymentPlan, createPaymentPlan, editPaymentPlan, PAYMENT_CARDS } from "./lib/payments.js";
+import {
+  loadFinanceData,
+  loadHouseholdDataV2,
+  saveFinanceData,
+  saveHouseholdDataV2,
+} from "./lib/storage.js";
 
 function getCurrencyOptions() {
   const codes =
@@ -83,8 +95,8 @@ function createId(prefix) {
   return `${prefix}-${id}`;
 }
 
-function downloadFinanceBackup(financeData) {
-  const serializedData = serializeFinanceBackup(financeData);
+function downloadFinanceBackup(financeData, serializer = serializeFinanceBackup) {
+  const serializedData = serializer(financeData);
   const backupBlob = new Blob([serializedData], { type: "application/json" });
   const downloadUrl = URL.createObjectURL(backupBlob);
   const downloadLink = document.createElement("a");
@@ -210,7 +222,7 @@ function SummaryCard({ label, amountMinor, currencyCode, tone, detail }) {
   );
 }
 
-function BalanceEditor({ label, amountMinor, currencyCode, onSave }) {
+function BalanceEditor({ label, amountMinor, currencyCode, onSave, idPrefix = label }) {
   const [amount, setAmount] = useState(() => formatMinorInput(amountMinor, currencyCode));
   const [error, setError] = useState("");
 
@@ -228,7 +240,7 @@ function BalanceEditor({ label, amountMinor, currencyCode, onSave }) {
     }
   }
 
-  const inputId = `balance-${label.toLowerCase().replaceAll(" ", "-")}`;
+  const inputId = `balance-${idPrefix.toLowerCase().replaceAll(" ", "-")}`;
 
   return (
     <article className="balance-editor">
@@ -423,7 +435,7 @@ function TransactionDialog({
 }
 
 function CategoryDialog({ categories, onClose, onSave }) {
-  const [kind, setKind] = useState("expense");
+  const [kind, setKind] = useState("payment");
   const [editingId, setEditingId] = useState(null);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -490,12 +502,12 @@ function CategoryDialog({ categories, onClose, onSave }) {
               Ingresos
             </button>
             <button
-              className={kind === "expense" ? "is-selected" : ""}
+              className={kind === "payment" ? "is-selected" : ""}
               type="button"
-              aria-pressed={kind === "expense"}
-              onClick={() => selectKind("expense")}
+              aria-pressed={kind === "payment"}
+              onClick={() => selectKind("payment")}
             >
-              Gastos
+              Pagos
             </button>
           </div>
           <button className="secondary-button" type="button" onClick={beginNewCategory}>
@@ -543,7 +555,13 @@ function CategoryDialog({ categories, onClose, onSave }) {
   );
 }
 
-function BackupDialog({ financeData, onClose, onImport }) {
+function BackupDialog({
+  financeData,
+  onClose,
+  onImport,
+  parser = parseFinanceBackup,
+  serializer = serializeFinanceBackup,
+}) {
   const fileInputRef = useRef(null);
   const [error, setError] = useState("");
 
@@ -563,7 +581,7 @@ function BackupDialog({ financeData, onClose, onImport }) {
     }
 
     fileInput.value = "";
-    const result = parseFinanceBackup(serializedData);
+    const result = parser(serializedData);
     if (!result.valid) {
       const errorMessages = {
         "invalid-json": "El archivo no contiene JSON válido.",
@@ -582,7 +600,7 @@ function BackupDialog({ financeData, onClose, onImport }) {
 
   function handleExport() {
     try {
-      downloadFinanceBackup(financeData);
+      downloadFinanceBackup(financeData, serializer);
       setError("");
     } catch {
       setError("No se pudo preparar el archivo de respaldo.");
@@ -877,27 +895,889 @@ function Dashboard({ financeData, setFinanceData, monthKey, setMonthKey, persist
   );
 }
 
+function IncomeDialog({ initialIncome, categories, currencyCode, onClose, onSave }) {
+  const [memberId, setMemberId] = useState(initialIncome?.memberId ?? "lisandro");
+  const [date, setDate] = useState(initialIncome?.date ?? getCurrentDateKey());
+  const [description, setDescription] = useState(initialIncome?.description ?? "");
+  const [amount, setAmount] = useState(
+    initialIncome ? formatMinorInput(initialIncome.amountMinor, currencyCode) : "",
+  );
+  const [categoryId, setCategoryId] = useState(
+    initialIncome?.categoryId ?? categories.find((category) => category.kind === "income")?.id ?? "",
+  );
+  const [error, setError] = useState("");
+  const incomeCategories = categories.filter((category) => category.kind === "income");
+
+  useEffect(() => {
+    if (!incomeCategories.some((category) => category.id === categoryId)) {
+      setCategoryId(incomeCategories[0]?.id ?? "");
+    }
+  }, [categoryId, incomeCategories]);
+
+  function handleSubmit(event) {
+    event.preventDefault();
+
+    let amountMinor;
+    try {
+      amountMinor = parseAmountToMinor(amount, currencyCode);
+    } catch {
+      setError("Introduce un importe válido con la precisión admitida por la moneda.");
+      return;
+    }
+
+    const incomeEntry = {
+      id: initialIncome?.id ?? createId("income"),
+      memberId,
+      date,
+      description: description.trim(),
+      amountMinor,
+      categoryId,
+    };
+
+    if (!incomeEntry.description || !incomeCategories.some((category) => category.id === categoryId)) {
+      setError("Completa la descripción y selecciona una categoría de ingreso.");
+      return;
+    }
+
+    onSave(incomeEntry);
+  }
+
+  return (
+    <DialogFrame
+      title={initialIncome ? "Editar ingreso" : "Nuevo ingreso"}
+      titleId="income-dialog-title"
+      onClose={onClose}
+    >
+      <form className="dialog-form" onSubmit={handleSubmit}>
+        <label className="field" htmlFor="income-member">
+          <span>Integrante</span>
+          <select id="income-member" value={memberId} onChange={(event) => setMemberId(event.target.value)}>
+            <option value="lisandro">Lisandro</option>
+            <option value="catriel">Catriel</option>
+          </select>
+        </label>
+        <label className="field" htmlFor="income-description">
+          <span>Descripción</span>
+          <input
+            id="income-description"
+            type="text"
+            maxLength="80"
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            required
+          />
+        </label>
+        <div className="form-row">
+          <label className="field" htmlFor="income-amount">
+            <span>Importe ({currencyCode})</span>
+            <input
+              id="income-amount"
+              type="number"
+              min="0"
+              step={getAmountStep(currencyCode)}
+              inputMode="decimal"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              required
+            />
+          </label>
+          <label className="field" htmlFor="income-date">
+            <span>Fecha</span>
+            <input
+              id="income-date"
+              type="date"
+              value={date}
+              onChange={(event) => setDate(event.target.value)}
+              required
+            />
+          </label>
+        </div>
+        <label className="field" htmlFor="income-category">
+          <span>Categoría</span>
+          <select
+            id="income-category"
+            value={categoryId}
+            onChange={(event) => setCategoryId(event.target.value)}
+            required
+          >
+            {incomeCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {error && <p className="field-error" role="alert">{error}</p>}
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Cancelar
+          </button>
+          <button className="primary-button" type="submit">
+            Guardar ingreso
+          </button>
+        </div>
+      </form>
+    </DialogFrame>
+  );
+}
+
+function PaymentPlanDialog({ initialPlan, categories, currencyCode, onClose, onSave }) {
+  const firstPending = initialPlan?.installments.find((installment) => installment.status === "pending");
+  const [description, setDescription] = useState(initialPlan?.description ?? "");
+  const [categoryId, setCategoryId] = useState(
+    initialPlan?.categoryId ?? categories.find((category) => category.kind === "payment")?.id ?? "",
+  );
+  const [responsibility, setResponsibility] = useState(initialPlan?.responsibility ?? "lisandro");
+  const [buyerMemberId, setBuyerMemberId] = useState(
+    initialPlan?.buyerMemberId ?? "lisandro",
+  );
+  const [cardName, setCardName] = useState(initialPlan?.cardName ?? "");
+  const [payerKind, setPayerKind] = useState(initialPlan?.payer.kind ?? "member");
+  const [payerMemberId, setPayerMemberId] = useState(initialPlan?.payer.memberId ?? "lisandro");
+  const [externalPayerName, setExternalPayerName] = useState(initialPlan?.payer.name ?? "");
+  const [currentInstallment, setCurrentInstallment] = useState(String(firstPending?.number ?? 1));
+  const [totalInstallments, setTotalInstallments] = useState(String(firstPending?.total ?? 1));
+  const [firstDueDate, setFirstDueDate] = useState(firstPending?.dueDate ?? getCurrentDateKey());
+  const [amount, setAmount] = useState(
+    firstPending ? formatMinorInput(firstPending.amountMinor, currencyCode) : "",
+  );
+  const [error, setError] = useState("");
+  const paymentCategories = categories.filter((category) => category.kind === "payment");
+  const buyerCards = PAYMENT_CARDS[buyerMemberId] ?? [];
+
+  useEffect(() => {
+    if (!buyerCards.includes(cardName)) setCardName("");
+  }, [buyerCards, cardName]);
+
+  function handleResponsibilityChange(nextResponsibility) {
+    setResponsibility(nextResponsibility);
+    if (nextResponsibility !== "shared") {
+      setBuyerMemberId(nextResponsibility);
+      setCardName("");
+    }
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+
+    let amountMinor;
+    try {
+      amountMinor = parseAmountToMinor(amount, currencyCode);
+    } catch {
+      setError("Introduce un importe válido con la precisión admitida por la moneda.");
+      return;
+    }
+
+    const payer =
+      payerKind === "external"
+        ? { kind: "external", name: externalPayerName.trim() }
+        : { kind: "member", memberId: payerMemberId };
+    const paymentInput = {
+      description: description.trim(),
+      categoryId,
+      responsibility,
+      buyerMemberId,
+      cardName: cardName || null,
+      payer,
+      currentInstallment: Number(currentInstallment),
+      totalInstallments: Number(totalInstallments),
+      firstDueDate,
+      amountMinor,
+    };
+
+    try {
+      if (initialPlan) {
+        const result = editPaymentPlan(initialPlan, paymentInput, categories);
+        if (!result.valid) {
+          setError("El total de cuotas no puede eliminar cuotas ya pagadas.");
+          return;
+        }
+        onSave(result.plan);
+      } else {
+        onSave(createPaymentPlan(paymentInput, categories));
+      }
+    } catch {
+      setError("Revisa los datos, la tarjeta y las cuotas del plan.");
+    }
+  }
+
+  return (
+    <DialogFrame
+      title={initialPlan ? "Editar plan de pago" : "Nuevo plan de pago"}
+      titleId="payment-plan-dialog-title"
+      onClose={onClose}
+    >
+      <form className="dialog-form" onSubmit={handleSubmit}>
+        <label className="field" htmlFor="payment-description">
+          <span>Descripción</span>
+          <input
+            id="payment-description"
+            type="text"
+            maxLength="80"
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            required
+          />
+        </label>
+        <label className="field" htmlFor="payment-category">
+          <span>Categoría</span>
+          <select
+            id="payment-category"
+            value={categoryId}
+            onChange={(event) => setCategoryId(event.target.value)}
+            required
+          >
+            {paymentCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field" htmlFor="payment-responsibility">
+          <span>Responsable</span>
+          <select
+            id="payment-responsibility"
+            value={responsibility}
+            onChange={(event) => handleResponsibilityChange(event.target.value)}
+          >
+            <option value="lisandro">Lisandro</option>
+            <option value="shared">Compartido · 50% cada uno</option>
+            <option value="catriel">Catriel</option>
+          </select>
+        </label>
+        <div className="form-row">
+          <label className="field" htmlFor="payment-buyer">
+            <span>Persona compradora</span>
+            <select
+              id="payment-buyer"
+              value={buyerMemberId}
+              disabled={responsibility !== "shared"}
+              onChange={(event) => {
+                setBuyerMemberId(event.target.value);
+                setCardName("");
+              }}
+            >
+              <option value="lisandro">Lisandro</option>
+              <option value="catriel">Catriel</option>
+            </select>
+          </label>
+          <label className="field" htmlFor="payment-card">
+            <span>Tarjeta</span>
+            <select id="payment-card" value={cardName} onChange={(event) => setCardName(event.target.value)}>
+              <option value="">Sin tarjeta</option>
+              {buyerCards.map((card) => (
+                <option key={card} value={card}>
+                  {card}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="form-row">
+          <label className="field" htmlFor="payment-payer-kind">
+            <span>Quién paga</span>
+            <select id="payment-payer-kind" value={payerKind} onChange={(event) => setPayerKind(event.target.value)}>
+              <option value="member">Integrante</option>
+              <option value="external">Externo</option>
+            </select>
+          </label>
+          {payerKind === "member" ? (
+            <label className="field" htmlFor="payment-payer-member">
+              <span>Pagador</span>
+              <select
+                id="payment-payer-member"
+                value={payerMemberId}
+                onChange={(event) => setPayerMemberId(event.target.value)}
+              >
+                <option value="lisandro">Lisandro</option>
+                <option value="catriel">Catriel</option>
+              </select>
+            </label>
+          ) : (
+            <label className="field" htmlFor="payment-payer-name">
+              <span>Nombre del pagador</span>
+              <input
+                id="payment-payer-name"
+                type="text"
+                value={externalPayerName}
+                onChange={(event) => setExternalPayerName(event.target.value)}
+                required
+              />
+            </label>
+          )}
+        </div>
+        <div className="form-row payment-installments-row">
+          <label className="field" htmlFor="payment-current-installment">
+            <span>Cuota actual</span>
+            <input
+              id="payment-current-installment"
+              type="number"
+              min={firstPending?.number ?? 1}
+              max={totalInstallments}
+              value={currentInstallment}
+              disabled={Boolean(initialPlan)}
+              onChange={(event) => setCurrentInstallment(event.target.value)}
+              required
+            />
+          </label>
+          <label className="field" htmlFor="payment-total-installments">
+            <span>Total de cuotas</span>
+            <input
+              id="payment-total-installments"
+              type="number"
+              min={currentInstallment}
+              value={totalInstallments}
+              onChange={(event) => setTotalInstallments(event.target.value)}
+              required
+            />
+          </label>
+          <label className="field" htmlFor="payment-amount">
+            <span>Importe de cada cuota ({currencyCode})</span>
+            <input
+              id="payment-amount"
+              type="number"
+              min="0"
+              step={getAmountStep(currencyCode)}
+              inputMode="decimal"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              required
+            />
+          </label>
+        </div>
+        <label className="field" htmlFor="payment-first-due-date">
+          <span>Fecha de vencimiento</span>
+          <input
+            id="payment-first-due-date"
+            type="date"
+            value={firstDueDate}
+            onChange={(event) => setFirstDueDate(event.target.value)}
+            required
+          />
+        </label>
+        {error && <p className="field-error" role="alert">{error}</p>}
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Cancelar
+          </button>
+          <button className="primary-button" type="submit">
+            Guardar plan
+          </button>
+        </div>
+      </form>
+    </DialogFrame>
+  );
+}
+
+function IncomeEntries({ entries, categories, currencyCode, onEdit, onDelete }) {
+  if (entries.length === 0) {
+    return <p className="panel-empty">Sin ingresos registrados este mes</p>;
+  }
+
+  return (
+    <ul className="panel-entry-list income-entry-list">
+      {entries.map((entry) => {
+        const category = categories.find((item) => item.id === entry.categoryId);
+        return (
+          <li className="income-entry" key={entry.id}>
+            <div className="entry-copy">
+              <strong>{entry.description}</strong>
+              <span>{getDateLabel(entry.date)} · {category?.name ?? "Sin categoría"}</span>
+            </div>
+            <strong className="income-value">{formatMinorAmount(entry.amountMinor, currencyCode)}</strong>
+            <div className="entry-actions">
+              <button className="text-button" type="button" onClick={() => onEdit(entry)}>
+                Editar
+              </button>
+              <button className="text-button danger-text" type="button" onClick={() => onDelete(entry)}>
+                Eliminar
+              </button>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function PaymentEntries({ entries, categories, currencyCode, onEdit, onMarkPaid, onCancel }) {
+  if (entries.length === 0) {
+    return <p className="panel-empty">Sin pagos para este mes</p>;
+  }
+
+  return (
+    <ul className="panel-entry-list payment-entry-list">
+      {entries.map(({ plan, installment }) => {
+        const category = categories.find((item) => item.id === plan.categoryId);
+        const payerName =
+          plan.payer.kind === "external"
+            ? plan.payer.name
+            : plan.payer.memberId === "lisandro"
+              ? "Lisandro"
+              : "Catriel";
+        const hasPendingInstallments = plan.installments.some((item) => item.status === "pending");
+
+        return (
+          <li className={`payment-entry ${installment.status}`} key={installment.id}>
+            <div className="entry-copy">
+              <div className="payment-entry-title">
+                <strong>{plan.description}</strong>
+                <span className={`status-pill ${installment.status}`}>
+                  {installment.status === "paid" ? "Pagada" : "Pendiente"}
+                </span>
+              </div>
+              <span>
+                {getDateLabel(installment.dueDate)} · Cuota {installment.number}/{installment.total}
+              </span>
+              <span>
+                {category?.name ?? "Sin categoría"} · {plan.cardName ?? "Sin tarjeta"} · Paga {payerName}
+              </span>
+            </div>
+            <strong className="payment-value">{formatMinorAmount(installment.amountMinor, currencyCode)}</strong>
+            <div className="entry-actions payment-entry-actions">
+              {installment.status === "pending" && (
+                <button className="text-button" type="button" onClick={() => onMarkPaid(plan, installment)}>
+                  Marcar pagada
+                </button>
+              )}
+              {hasPendingInstallments && (
+                <button className="text-button" type="button" onClick={() => onEdit(plan)}>
+                  Editar
+                </button>
+              )}
+              {hasPendingInstallments && (
+                <button className="text-button danger-text" type="button" onClick={() => onCancel(plan)}>
+                  Cancelar plan
+                </button>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function MemberPanel({
+  memberId,
+  data,
+  summary,
+  incomeEntries,
+  paymentEntries,
+  currencyCode,
+  onAddIncome,
+  onEditIncome,
+  onDeleteIncome,
+  onEditPayment,
+  onMarkPaid,
+  onCancelPlan,
+  onSaveBalance,
+}) {
+  const memberName = memberId === "lisandro" ? "Lisandro" : "Catriel";
+  const memberSummary = summary.members[memberId];
+
+  return (
+    <section className={`household-panel member-panel ${memberId}-panel`} aria-labelledby={`${memberId}-title`}>
+      <header className="household-panel-header member-panel-header">
+        <p className="eyebrow">FINANZAS PERSONALES</p>
+        <h2 id={`${memberId}-title`}>{memberName}</h2>
+        <div className="available-readout">
+          <span>Disponible del mes</span>
+          <strong>{formatMinorAmount(memberSummary.availableMinor, currencyCode)}</strong>
+        </div>
+      </header>
+      <div className="member-stats">
+        <div>
+          <span>Ingresos</span>
+          <strong>{formatMinorAmount(memberSummary.incomeMinor, currencyCode)}</strong>
+        </div>
+        <div>
+          <span>Pagos imputados</span>
+          <strong>{formatMinorAmount(memberSummary.paymentsMinor, currencyCode)}</strong>
+        </div>
+      </div>
+      <section className="panel-section" aria-labelledby={`${memberId}-income-title`}>
+        <div className="panel-section-heading">
+          <h3 id={`${memberId}-income-title`}>Ingresos</h3>
+          <button className="text-button" type="button" onClick={() => onAddIncome(memberId)}>
+            + Añadir
+          </button>
+        </div>
+        <IncomeEntries
+          entries={incomeEntries}
+          categories={data.categories}
+          currencyCode={currencyCode}
+          onEdit={onEditIncome}
+          onDelete={onDeleteIncome}
+        />
+      </section>
+      <section className="panel-section" aria-labelledby={`${memberId}-payments-title`}>
+        <div className="panel-section-heading">
+          <h3 id={`${memberId}-payments-title`}>Pagos personales</h3>
+        </div>
+        <PaymentEntries
+          entries={paymentEntries}
+          categories={data.categories}
+          currencyCode={currencyCode}
+          onEdit={onEditPayment}
+          onMarkPaid={onMarkPaid}
+          onCancel={onCancelPlan}
+        />
+      </section>
+      <section className="panel-section member-balance-section" aria-label={`Ahorro y deuda de ${memberName}`}>
+        <div className="panel-section-heading">
+          <h3>Ahorro y deuda</h3>
+        </div>
+        <div className="member-balance-grid">
+          <BalanceEditor
+            label="Ahorro"
+            idPrefix={`${memberId}-savings`}
+            amountMinor={data.balances[memberId].savingsMinor}
+            currencyCode={currencyCode}
+            onSave={(amountMinor) => onSaveBalance(memberId, "savingsMinor", amountMinor)}
+          />
+          <BalanceEditor
+            label="Deuda"
+            idPrefix={`${memberId}-debt`}
+            amountMinor={data.balances[memberId].debtMinor}
+            currencyCode={currencyCode}
+            onSave={(amountMinor) => onSaveBalance(memberId, "debtMinor", amountMinor)}
+          />
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function SharedPanel({ entries, categories, currencyCode, sharedCommitmentsMinor, onEdit, onMarkPaid, onCancel }) {
+  return (
+    <section className="household-panel shared-panel" aria-labelledby="shared-title">
+      <header className="household-panel-header shared-panel-header">
+        <p className="eyebrow">RESPONSABILIDAD CONJUNTA</p>
+        <h2 id="shared-title">Compartido</h2>
+        <div className="available-readout shared-total">
+          <span>Compromisos del mes</span>
+          <strong>{formatMinorAmount(sharedCommitmentsMinor, currencyCode)}</strong>
+        </div>
+        <p className="shared-rule">Se imputa 50% a cada uno</p>
+      </header>
+      <section className="panel-section shared-payment-section" aria-labelledby="shared-payments-title">
+        <div className="panel-section-heading">
+          <h3>Pagos compartidos</h3>
+        </div>
+        <PaymentEntries
+          entries={entries}
+          categories={categories}
+          currencyCode={currencyCode}
+          onEdit={onEdit}
+          onMarkPaid={onMarkPaid}
+          onCancel={onCancel}
+        />
+      </section>
+    </section>
+  );
+}
+
+function HouseholdDashboard({ data, setData, monthKey, setMonthKey, persistenceStatus }) {
+  const [incomeEditor, setIncomeEditor] = useState(null);
+  const [paymentEditor, setPaymentEditor] = useState(null);
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [backupDialogOpen, setBackupDialogOpen] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
+  const currencyCode = data.settings.currencyCode;
+  const summary = getHouseholdMonthSummaryV2(data, monthKey);
+
+  function getMonthPayments(responsibility) {
+    return data.paymentPlans
+      .filter((plan) => plan.responsibility === responsibility)
+      .flatMap((plan) =>
+        plan.installments
+          .filter((installment) => installment.dueDate.slice(0, 7) === monthKey)
+          .map((installment) => ({ plan, installment })),
+      )
+      .sort((first, second) => first.installment.dueDate.localeCompare(second.installment.dueDate));
+  }
+
+  const lisandroIncome = data.incomeEntries
+    .filter((entry) => entry.memberId === "lisandro" && entry.date.slice(0, 7) === monthKey)
+    .sort((first, second) => second.date.localeCompare(first.date));
+  const catrielIncome = data.incomeEntries
+    .filter((entry) => entry.memberId === "catriel" && entry.date.slice(0, 7) === monthKey)
+    .sort((first, second) => second.date.localeCompare(first.date));
+  const lisandroPayments = getMonthPayments("lisandro");
+  const sharedPayments = getMonthPayments("shared");
+  const catrielPayments = getMonthPayments("catriel");
+
+  function saveIncomeEntry(incomeEntry) {
+    setData((currentData) => {
+      const exists = currentData.incomeEntries.some((entry) => entry.id === incomeEntry.id);
+      return {
+        ...currentData,
+        incomeEntries: exists
+          ? currentData.incomeEntries.map((entry) => (entry.id === incomeEntry.id ? incomeEntry : entry))
+          : [...currentData.incomeEntries, incomeEntry],
+      };
+    });
+    setIncomeEditor(null);
+  }
+
+  function deleteIncomeEntry(incomeEntry) {
+    if (!window.confirm(`¿Eliminar el ingreso «${incomeEntry.description}»?`)) return;
+    setData((currentData) => ({
+      ...currentData,
+      incomeEntries: currentData.incomeEntries.filter((entry) => entry.id !== incomeEntry.id),
+    }));
+  }
+
+  function savePaymentPlan(paymentPlan) {
+    setData((currentData) => {
+      const exists = currentData.paymentPlans.some((plan) => plan.id === paymentPlan.id);
+      return {
+        ...currentData,
+        paymentPlans: exists
+          ? currentData.paymentPlans.map((plan) => (plan.id === paymentPlan.id ? paymentPlan : plan))
+          : [...currentData.paymentPlans, paymentPlan],
+      };
+    });
+    setPaymentEditor(null);
+  }
+
+  function markInstallmentPaid(paymentPlan, installment) {
+    setData((currentData) => ({
+      ...currentData,
+      paymentPlans: currentData.paymentPlans.map((plan) =>
+        plan.id !== paymentPlan.id
+          ? plan
+          : {
+              ...plan,
+              installments: plan.installments.map((item) =>
+                item.id === installment.id ? { ...item, status: "paid" } : item,
+              ),
+            },
+      ),
+    }));
+  }
+
+  function cancelPlan(paymentPlan) {
+    const result = cancelPaymentPlan(paymentPlan);
+    const message =
+      result.action === "delete"
+        ? `¿Eliminar el plan «${paymentPlan.description}»?`
+        : `El plan «${paymentPlan.description}» tiene pagos realizados. ¿Cancelar sus cuotas pendientes?`;
+    if (!window.confirm(message)) return;
+
+    setData((currentData) => ({
+      ...currentData,
+      paymentPlans:
+        result.action === "delete"
+          ? currentData.paymentPlans.filter((plan) => plan.id !== paymentPlan.id)
+          : currentData.paymentPlans.map((plan) => (plan.id === paymentPlan.id ? result.plan : plan)),
+    }));
+  }
+
+  function saveCategory(category) {
+    setData((currentData) => {
+      const exists = currentData.categories.some((item) => item.id === category.id);
+      return {
+        ...currentData,
+        categories: exists
+          ? currentData.categories.map((item) => (item.id === category.id ? category : item))
+          : [...currentData.categories, category],
+      };
+    });
+  }
+
+  function saveBalance(memberId, balanceKey, amountMinor) {
+    setData((currentData) => ({
+      ...currentData,
+      balances: {
+        ...currentData.balances,
+        [memberId]: { ...currentData.balances[memberId], [balanceKey]: amountMinor },
+      },
+    }));
+  }
+
+  function importBackup(importedData) {
+    setData(importedData);
+    setBackupDialogOpen(false);
+    setBackupMessage("Respaldo importado correctamente.");
+  }
+
+  function updateMonth(amount) {
+    setMonthKey((currentMonth) => shiftMonth(currentMonth, amount));
+  }
+
+  return (
+    <>
+      <main className="workspace household-workspace">
+        <StorageNotice status={persistenceStatus} />
+        {backupMessage && (
+          <div className="success-notice" role="status">
+            <span>{backupMessage}</span>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Cerrar aviso"
+              title="Cerrar aviso"
+              onClick={() => setBackupMessage("")}
+            >
+              ×
+            </button>
+          </div>
+        )}
+        <div className="page-heading household-heading">
+          <div>
+            <p className="eyebrow">FINANZAS DEL HOGAR</p>
+            <h1>Control mensual</h1>
+          </div>
+          <div className="page-actions household-actions">
+            <button className="secondary-button" type="button" onClick={() => setCategoryDialogOpen(true)}>
+              Categorías
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setBackupDialogOpen(true)}>
+              Respaldo
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setIncomeEditor({ income: null })}>
+              + Ingreso
+            </button>
+            <button className="primary-button" type="button" onClick={() => setPaymentEditor({ plan: null })}>
+              + Pago
+            </button>
+          </div>
+        </div>
+
+        <div className="month-switcher" aria-label="Periodo del resumen">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Mes anterior"
+            title="Mes anterior"
+            onClick={() => updateMonth(-1)}
+          >
+            ‹
+          </button>
+          <strong>{getMonthLabel(monthKey)}</strong>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Mes siguiente"
+            title="Mes siguiente"
+            onClick={() => updateMonth(1)}
+          >
+            ›
+          </button>
+        </div>
+
+        <div className="household-grid">
+          <MemberPanel
+            memberId="lisandro"
+            data={data}
+            summary={summary}
+            incomeEntries={lisandroIncome}
+            paymentEntries={lisandroPayments}
+            currencyCode={currencyCode}
+            onAddIncome={(memberId) => setIncomeEditor({ income: null, memberId })}
+            onEditIncome={(income) => setIncomeEditor({ income })}
+            onDeleteIncome={deleteIncomeEntry}
+            onEditPayment={(plan) => setPaymentEditor({ plan })}
+            onMarkPaid={markInstallmentPaid}
+            onCancelPlan={cancelPlan}
+            onSaveBalance={saveBalance}
+          />
+          <SharedPanel
+            entries={sharedPayments}
+            categories={data.categories}
+            currencyCode={currencyCode}
+            sharedCommitmentsMinor={summary.sharedCommitmentsMinor}
+            onEdit={(plan) => setPaymentEditor({ plan })}
+            onMarkPaid={markInstallmentPaid}
+            onCancel={cancelPlan}
+          />
+          <MemberPanel
+            memberId="catriel"
+            data={data}
+            summary={summary}
+            incomeEntries={catrielIncome}
+            paymentEntries={catrielPayments}
+            currencyCode={currencyCode}
+            onAddIncome={(memberId) => setIncomeEditor({ income: null, memberId })}
+            onEditIncome={(income) => setIncomeEditor({ income })}
+            onDeleteIncome={deleteIncomeEntry}
+            onEditPayment={(plan) => setPaymentEditor({ plan })}
+            onMarkPaid={markInstallmentPaid}
+            onCancelPlan={cancelPlan}
+            onSaveBalance={saveBalance}
+          />
+        </div>
+      </main>
+
+      <footer className="app-footer">
+        <span>FINANZAS DEL HOGAR</span>
+        <span>{currencyCode} · DATOS LOCALES</span>
+      </footer>
+
+      {incomeEditor && (
+        <IncomeDialog
+          key={incomeEditor.income?.id ?? `new-${incomeEditor.memberId ?? "income"}`}
+          initialIncome={incomeEditor.income}
+          categories={data.categories}
+          currencyCode={currencyCode}
+          onClose={() => setIncomeEditor(null)}
+          onSave={saveIncomeEntry}
+        />
+      )}
+      {paymentEditor && (
+        <PaymentPlanDialog
+          key={paymentEditor.plan?.id ?? "new-payment-plan"}
+          initialPlan={paymentEditor.plan}
+          categories={data.categories}
+          currencyCode={currencyCode}
+          onClose={() => setPaymentEditor(null)}
+          onSave={savePaymentPlan}
+        />
+      )}
+      {categoryDialogOpen && (
+        <CategoryDialog
+          categories={data.categories}
+          onClose={() => setCategoryDialogOpen(false)}
+          onSave={saveCategory}
+        />
+      )}
+      {backupDialogOpen && (
+        <BackupDialog
+          financeData={data}
+          onClose={() => setBackupDialogOpen(false)}
+          onImport={importBackup}
+          parser={parseHouseholdBackupV2}
+          serializer={serializeHouseholdBackupV2}
+        />
+      )}
+    </>
+  );
+}
+
 function App() {
-  const [loadedState] = useState(() => loadFinanceData());
-  const [financeData, setFinanceData] = useState(loadedState.data);
+  const [loadedState] = useState(() => loadHouseholdDataV2());
+  const [householdData, setHouseholdData] = useState(loadedState.data);
   const [persistenceStatus, setPersistenceStatus] = useState(loadedState.status);
   const [currencySelection, setCurrencySelection] = useState("");
   const [monthKey, setMonthKey] = useState(getCurrentMonthKey);
 
   useEffect(() => {
-    if (persistenceStatus !== "available" || !financeData.settings.currencyCode) return;
+    if (persistenceStatus !== "available" || !householdData.settings.currencyCode) return;
 
-    const result = saveFinanceData(financeData);
+    const result = saveHouseholdDataV2(householdData);
     if (result.status === "unavailable" || result.status === "invalid") {
       setPersistenceStatus(result.status === "invalid" ? "invalid" : "unavailable");
     }
-  }, [financeData, persistenceStatus]);
+  }, [householdData, persistenceStatus]);
 
   function handleCurrencySubmit(event) {
     event.preventDefault();
     if (!currencyOptions.some((option) => option.code === currencySelection)) return;
 
-    setFinanceData((currentData) => ({
+    setHouseholdData((currentData) => ({
       ...currentData,
       settings: { ...currentData.settings, currencyCode: currencySelection },
     }));
@@ -912,10 +1792,10 @@ function App() {
           {persistenceStatus === "available" ? "Datos locales" : "Solo esta sesión"}
         </div>
       </header>
-      {financeData.settings.currencyCode ? (
-        <Dashboard
-          financeData={financeData}
-          setFinanceData={setFinanceData}
+      {householdData.settings.currencyCode ? (
+        <HouseholdDashboard
+          data={householdData}
+          setData={setHouseholdData}
           monthKey={monthKey}
           setMonthKey={setMonthKey}
           persistenceStatus={persistenceStatus}

@@ -1,6 +1,6 @@
 # SPEC 02 — Control de pagos personales y compartidos
 
-> **Estado:** Aprobado
+> **Estado:** Implementado
 > **Depende de:** SPEC 01
 > **Fecha:** 2026-10-04
 > **Objetivo:** Extender el dashboard para controlar ingresos y cuotas pendientes de Lisandro y Catriel, distribuir los pagos compartidos por mitades y mostrar el disponible mensual de cada uno.
@@ -54,6 +54,7 @@ const householdDataV2 = {
     { id: "catriel", name: "Catriel" }
   ],
   categories: [
+    { id: "income-other", kind: "income", name: "Otros ingresos" },
     { id: "home", kind: "payment", name: "Hogar" }
   ],
   incomeEntries: [
@@ -62,7 +63,8 @@ const householdDataV2 = {
       memberId: "lisandro",
       date: "2026-10-01",
       description: "Sueldo",
-      amountMinor: 250000
+      amountMinor: 250000,
+      categoryId: "income-other"
     }
   ],
   paymentPlans: [
@@ -107,27 +109,29 @@ El disponible mensual de cada persona se calcula a partir de sus ingresos y las 
 
 ## Criterios de aceptación
 
-- [ ] `npm run dev`, `npm test` y `npm run build` terminan correctamente.
-- [ ] En escritorio aparecen Lisandro a la izquierda, compartido al centro y Catriel a la derecha; en móvil se apilan en ese orden sin desbordamiento horizontal.
-- [ ] Un ingreso requiere titular, fecha, descripción e importe y se suma solo a esa persona en el mes de su fecha.
-- [ ] Las tarjetas ofrecidas corresponden exactamente a la lista fija de la persona compradora.
-- [ ] Cada pago permite elegir responsable, comprador/tarjeta, pagador, cuota actual, cantidad total, importe por cuota y vencimiento inicial.
-- [ ] Un pago compartido imputa 50% a cada integrante y asigna el centavo impar a la persona compradora.
-- [ ] Un pago a cargo de una persona externa no reduce el disponible de Lisandro ni Catriel.
-- [ ] El plan genera cuotas mensuales desde la actual hasta la última y ajusta al fin de mes los días de vencimiento inexistentes.
-- [ ] Marcar una cuota como pagada conserva su registro y no cambia el disponible proyectado del mes.
-- [ ] Editar un plan cambia la cuota actual y las futuras pendientes, sin alterar cuotas pagadas.
-- [ ] Eliminar un plan con cuotas pagadas conserva el historial y cancela únicamente las futuras pendientes.
-- [ ] El disponible de cada persona equivale a sus ingresos menos sus pagos personales y la mitad de los compartidos del mes seleccionado.
-- [ ] Ahorro y deuda aparecen separados por persona y no cambian el cálculo del disponible.
-- [ ] Crear v2 conserva intactos los datos v1 y copia únicamente la moneda; no asigna titulares ni convierte gastos automáticamente.
-- [ ] Exportar e importar conserva el modelo v2 completo; JSON inválido o de versión incompatible no altera los datos actuales.
-- [ ] Las pruebas cubren cuotas, reparto, centavos, pagadores externos, cálculo mensual y validación/importación de v2.
+- [x] `npm run dev`, `npm test` y `npm run build` terminan correctamente.
+- [x] En escritorio aparecen Lisandro a la izquierda, compartido al centro y Catriel a la derecha; en móvil se apilan en ese orden sin desbordamiento horizontal.
+- [x] Un ingreso requiere titular, fecha, descripción e importe y se suma solo a esa persona en el mes de su fecha.
+- [x] Cada ingreso requiere una categoría de tipo `income` y cada plan una categoría de tipo `payment`.
+- [x] Las tarjetas ofrecidas corresponden exactamente a la lista fija de la persona compradora.
+- [x] Cada pago permite elegir responsable, comprador/tarjeta, pagador, cuota actual, cantidad total, importe por cuota y vencimiento inicial.
+- [x] Un pago compartido imputa 50% a cada integrante y asigna el centavo impar a la persona compradora.
+- [x] Un pago a cargo de una persona externa no reduce el disponible de Lisandro ni Catriel.
+- [x] El plan genera cuotas mensuales desde la actual hasta la última y ajusta al fin de mes los días de vencimiento inexistentes.
+- [x] Marcar una cuota como pagada conserva su registro y no cambia el disponible proyectado del mes.
+- [x] Editar un plan cambia la cuota actual y las futuras pendientes, sin alterar cuotas pagadas.
+- [x] Eliminar un plan con cuotas pagadas conserva el historial y cancela únicamente las futuras pendientes.
+- [x] El disponible de cada persona equivale a sus ingresos menos sus pagos personales y la mitad de los compartidos del mes seleccionado.
+- [x] Ahorro y deuda aparecen separados por persona y no cambian el cálculo del disponible.
+- [x] Crear v2 conserva intactos los datos v1 y copia únicamente la moneda; no asigna titulares ni convierte gastos automáticamente.
+- [x] Exportar e importar conserva el modelo v2 completo; JSON inválido o de versión incompatible no altera los datos actuales.
+- [x] Las pruebas cubren cuotas, reparto, centavos, pagadores externos, cálculo mensual y validación/importación de v2.
 
 ## Decisiones
 
 - **Sí:** crear SPEC 02 dependiente de SPEC 01; no reabrir el contrato ya implementado.
 - **Sí:** mantener las categorías y los saldos de ahorro/deuda, ahora separados por persona.
+- **Sí:** cada ingreso conserva su categoría y la referencia debe apuntar a una categoría de tipo `income`.
 - **Sí:** registrar ingresos y cuentas por pagar, no gastos cotidianos.
 - **Sí:** separar responsabilidad, comprador/tarjeta y pagador; el disponible se imputa por responsabilidad.
 - **Sí:** mantener listas de tarjetas fijas y dividir pagos compartidos en partes iguales.
