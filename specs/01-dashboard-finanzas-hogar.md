@@ -1,6 +1,6 @@
 # SPEC 01 — Dashboard de finanzas del hogar
 
-> **Estado:** Aprobado
+> **Estado:** Implementado
 > **Depende de:** Ninguna
 > **Fecha:** 2026-10-03
 > **Objetivo:** Crear una aplicación web local para registrar manualmente las finanzas de un hogar y consultar sus ingresos, gastos, balance mensual y totales de ahorro y deuda.
@@ -69,18 +69,18 @@ const householdData = {
 
 ## Criterios de aceptación
 
-- [ ] `npm run dev` abre la aplicación sin errores en consola y `npm run build` termina correctamente.
-- [ ] En el primer inicio se solicita un código ISO 4217 y se usa para mostrar y formatear importes.
-- [ ] El dashboard inicia en el mes actual; navegar a otro mes cambia el periodo de las sumas sin mezclar movimientos de meses distintos.
-- [ ] El total de ingresos, el total de gastos y el balance mensual se calculan como ingresos, gastos e ingresos menos gastos, respectivamente.
-- [ ] Se puede crear, editar y borrar un ingreso o gasto; cada cambio actualiza el dashboard del periodo correspondiente.
-- [ ] Se pueden crear y editar categorías para ingresos y gastos, y asignarlas a movimientos del mismo tipo.
-- [ ] Se pueden modificar los totales agregados de ahorro y deuda; esos valores no alteran el cálculo del balance mensual.
-- [ ] Al recargar la aplicación se conservan moneda, categorías, movimientos y totales cuando localStorage está disponible.
-- [ ] La exportación incluye el estado completo y su versión; una importación válida requiere confirmación antes de reemplazar el estado actual.
-- [ ] Una importación inválida o de versión no compatible no modifica los datos existentes y muestra un error identificable.
-- [ ] Las pruebas Vitest cubren los cálculos financieros y los casos válidos e inválidos de persistencia e importación.
-- [ ] Si localStorage no está disponible, la aplicación informa que los cambios no persistirán al cerrar la sesión.
+- [x] `npm run dev` abre la aplicación sin errores en consola y `npm run build` termina correctamente.
+- [x] En el primer inicio se solicita un código ISO 4217 y se usa para mostrar y formatear importes.
+- [x] El dashboard inicia en el mes actual; navegar a otro mes cambia el periodo de las sumas sin mezclar movimientos de meses distintos.
+- [x] El total de ingresos, el total de gastos y el balance mensual se calculan como ingresos, gastos e ingresos menos gastos, respectivamente.
+- [x] Se puede crear, editar y borrar un ingreso o gasto; cada cambio actualiza el dashboard del periodo correspondiente.
+- [x] Se pueden crear y editar categorías para ingresos y gastos, y asignarlas a movimientos del mismo tipo.
+- [x] Se pueden modificar los totales agregados de ahorro y deuda; esos valores no alteran el cálculo del balance mensual.
+- [x] Al recargar la aplicación se conservan moneda, categorías, movimientos y totales cuando localStorage está disponible.
+- [x] La exportación incluye el estado completo y su versión; una importación válida requiere confirmación antes de reemplazar el estado actual.
+- [x] Una importación inválida o de versión no compatible no modifica los datos existentes y muestra un error identificable.
+- [x] Las pruebas Vitest cubren los cálculos financieros y los casos válidos e inválidos de persistencia e importación.
+- [x] Si localStorage no está disponible, la aplicación informa que los cambios no persistirán al cerrar la sesión.
 
 ## Decisiones
 
