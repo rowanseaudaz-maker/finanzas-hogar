@@ -1,1815 +1,1124 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  formatMinorAmount,
-  getHouseholdMonthSummaryV2,
-  getMonthSummary,
-  parseAmountToMinor,
-  validateTransaction,
-} from "./lib/finance.js";
-import {
-  parseFinanceBackup,
-  parseHouseholdBackupV2,
-  serializeFinanceBackup,
-  serializeHouseholdBackupV2,
-} from "./lib/backup.js";
-import { cancelPaymentPlan, createPaymentPlan, editPaymentPlan, PAYMENT_CARDS } from "./lib/payments.js";
-import {
-  loadFinanceData,
-  loadHouseholdDataV2,
-  saveFinanceData,
-  saveHouseholdDataV2,
-} from "./lib/storage.js";
-
-function getCurrencyOptions() {
-  const codes =
-    typeof Intl.supportedValuesOf === "function"
-      ? Intl.supportedValuesOf("currency")
-      : ["ARS", "CAD", "CLP", "COP", "EUR", "GBP", "JPY", "MXN", "USD"];
-  const names = new Intl.DisplayNames(["es-ES"], { type: "currency" });
-
-  return codes
-    .map((code) => ({ code, label: `${code} · ${names.of(code)}` }))
-    .sort((first, second) => first.label.localeCompare(second.label, "es"));
-}
-
-const currencyOptions = getCurrencyOptions();
-
-function getCurrentDateKey() {
-  const date = new Date();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
-
-function getCurrentMonthKey() {
-  return getCurrentDateKey().slice(0, 7);
-}
-
-function shiftMonth(monthKey, amount) {
-  const [year, month] = monthKey.split("-").map(Number);
-  const shiftedDate = new Date(Date.UTC(year, month - 1 + amount, 1));
-  const shiftedMonth = String(shiftedDate.getUTCMonth() + 1).padStart(2, "0");
-  return `${shiftedDate.getUTCFullYear()}-${shiftedMonth}`;
-}
-
-function getMonthLabel(monthKey) {
-  const [year, month] = monthKey.split("-").map(Number);
-  const label = new Intl.DateTimeFormat("es-ES", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(new Date(Date.UTC(year, month - 1, 1)));
-  return `${label[0].toLocaleUpperCase("es-ES")}${label.slice(1)}`;
-}
-
-function getDateLabel(dateKey) {
-  return new Intl.DateTimeFormat("es-ES", {
-    day: "2-digit",
-    month: "short",
-    timeZone: "UTC",
-  }).format(new Date(`${dateKey}T12:00:00.000Z`));
-}
-
-function getAmountStep(currencyCode) {
-  const fractionDigits = new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: currencyCode,
-  }).resolvedOptions().maximumFractionDigits;
-  return String(1 / 10 ** fractionDigits);
-}
-
-function formatMinorInput(amountMinor, currencyCode) {
-  const fractionDigits = new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: currencyCode,
-  }).resolvedOptions().maximumFractionDigits;
-  const scale = 10n ** BigInt(fractionDigits);
-  const amount = BigInt(amountMinor);
-  const wholePart = amount / scale;
-  const fractionPart = (amount % scale).toString().padStart(fractionDigits, "0").replace(/0+$/, "");
-  return fractionPart ? `${wholePart}.${fractionPart}` : wholePart.toString();
-}
-
-function createId(prefix) {
-  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${prefix}-${id}`;
-}
-
-function downloadFinanceBackup(financeData, serializer = serializeFinanceBackup) {
-  const serializedData = serializer(financeData);
-  const backupBlob = new Blob([serializedData], { type: "application/json" });
-  const downloadUrl = URL.createObjectURL(backupBlob);
-  const downloadLink = document.createElement("a");
-  downloadLink.href = downloadUrl;
-  downloadLink.download = `finanzas-hogar-${getCurrentDateKey()}.json`;
-  document.body.append(downloadLink);
-  downloadLink.click();
-  downloadLink.remove();
-  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-}
-
-function Brand() {
-  return (
-    <a className="brand" href="/" aria-label="Finanzas del hogar">
-      <span className="brand-mark" aria-hidden="true">
-        F
-      </span>
-      <span className="brand-name">
-        <strong>Hogar</strong>
-        <span>FINANZAS</span>
-      </span>
-    </a>
-  );
-}
-
-function StorageNotice({ status }) {
-  if (status === "available") return null;
-
-  const message =
-    status === "invalid"
-      ? "Los datos guardados no se pudieron leer. Los cambios de esta sesión no se guardarán."
-      : "No se pudo acceder al almacenamiento del navegador. Los cambios de esta sesión no se guardarán.";
-
-  return (
-    <div className="storage-notice" role="alert">
-      {message}
-    </div>
-  );
-}
-
-function DialogFrame({ title, titleId, onClose, children }) {
-  const dialogRef = useRef(null);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return undefined;
-
-    dialog.showModal();
-    return () => {
-      if (dialog.open) dialog.close();
-    };
-  }, []);
-
-  function handleCancel(event) {
-    event.preventDefault();
-    onClose();
-  }
-
-  function handleBackdropClick(event) {
-    if (event.target === event.currentTarget) onClose();
-  }
-
-  return (
-    <dialog
-      ref={dialogRef}
-      className="dialog"
-      aria-labelledby={titleId}
-      onCancel={handleCancel}
-      onClick={handleBackdropClick}
-    >
-      <div className="dialog-heading">
-        <h2 id={titleId}>{title}</h2>
-        <button className="icon-button dialog-close" type="button" aria-label="Cerrar" title="Cerrar" onClick={onClose}>
-          ×
-        </button>
-      </div>
-      {children}
-    </dialog>
-  );
-}
-
-function CurrencySetup({ selectedCurrency, onCurrencyChange, onSubmit, persistenceStatus }) {
-  return (
-    <main className="setup-workspace">
-      <StorageNotice status={persistenceStatus} />
-      <div className="setup-heading">
-        <p className="eyebrow">CONFIGURACIÓN INICIAL</p>
-        <h1>Moneda del hogar</h1>
-      </div>
-      <form className="setup-form" onSubmit={onSubmit}>
-        <label className="field" htmlFor="household-currency">
-          <span>Moneda ISO 4217</span>
-          <select
-            id="household-currency"
-            autoComplete="off"
-            value={selectedCurrency}
-            onChange={(event) => onCurrencyChange(event.target.value)}
-            required
-          >
-            <option value="">Selecciona una moneda</option>
-            {currencyOptions.map(({ code, label }) => (
-              <option key={code} value={code}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button className="primary-button" type="submit" disabled={!selectedCurrency}>
-          Continuar
-        </button>
-      </form>
-    </main>
-  );
-}
-
-function SummaryCard({ label, amountMinor, currencyCode, tone, detail }) {
-  return (
-    <article className={`summary-item ${tone}`}>
-      <p>{label}</p>
-      <strong>{formatMinorAmount(amountMinor, currencyCode)}</strong>
-      <span>{detail}</span>
-    </article>
-  );
-}
-
-function BalanceEditor({ label, amountMinor, currencyCode, onSave, idPrefix = label }) {
-  const [amount, setAmount] = useState(() => formatMinorInput(amountMinor, currencyCode));
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    setAmount(formatMinorInput(amountMinor, currencyCode));
-  }, [amountMinor, currencyCode]);
-
-  function handleSubmit(event) {
-    event.preventDefault();
-    try {
-      onSave(parseAmountToMinor(amount, currencyCode));
-      setError("");
-    } catch {
-      setError("Revisa el importe y la precisión decimal de la moneda.");
-    }
-  }
-
-  const inputId = `balance-${idPrefix.toLowerCase().replaceAll(" ", "-")}`;
-
-  return (
-    <article className="balance-editor">
-      <div className="balance-current">
-        <p className="eyebrow">{label}</p>
-        <strong>{formatMinorAmount(amountMinor, currencyCode)}</strong>
-      </div>
-      <form className="balance-form" onSubmit={handleSubmit}>
-        <label className="field" htmlFor={inputId}>
-          <span>Actualizar total</span>
-          <input
-            id={inputId}
-            type="number"
-            min="0"
-            step={getAmountStep(currencyCode)}
-            inputMode="decimal"
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            required
-          />
-        </label>
-        <button className="secondary-button" type="submit">
-          Guardar
-        </button>
-        {error && <p className="field-error" role="alert">{error}</p>}
-      </form>
-    </article>
-  );
-}
-
-function TransactionDialog({
-  initialTransaction,
-  categories,
-  currencyCode,
-  onClose,
-  onSave,
-  onManageCategories,
-}) {
-  const [kind, setKind] = useState(initialTransaction?.kind ?? "expense");
-  const [date, setDate] = useState(initialTransaction?.date ?? getCurrentDateKey());
-  const [description, setDescription] = useState(initialTransaction?.description ?? "");
-  const [amount, setAmount] = useState(
-    initialTransaction ? formatMinorInput(initialTransaction.amountMinor, currencyCode) : "",
-  );
-  const [categoryId, setCategoryId] = useState(
-    initialTransaction?.categoryId ?? categories.find((category) => category.kind === kind)?.id ?? "",
-  );
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!categories.some((category) => category.id === categoryId && category.kind === kind)) {
-      setCategoryId(categories.find((category) => category.kind === kind)?.id ?? "");
-    }
-  }, [categories, categoryId, kind]);
-
-  function handleKindChange(nextKind) {
-    setKind(nextKind);
-    setCategoryId(categories.find((category) => category.kind === nextKind)?.id ?? "");
-    setError("");
-  }
-
-  function handleSubmit(event) {
-    event.preventDefault();
-
-    let amountMinor;
-    try {
-      amountMinor = parseAmountToMinor(amount, currencyCode);
-    } catch {
-      setError("Introduce un importe válido con la precisión admitida por la moneda.");
-      return;
-    }
-
-    const transaction = {
-      id: initialTransaction?.id ?? createId("transaction"),
-      kind,
-      date,
-      description: description.trim(),
-      amountMinor,
-      categoryId,
-    };
-    const validation = validateTransaction(transaction, categories);
-
-    if (!validation.valid) {
-      setError("Completa los campos y elige una categoría del mismo tipo.");
-      return;
-    }
-
-    onSave(transaction);
-  }
-
-  const matchingCategories = categories.filter((category) => category.kind === kind);
-  const amountStep = getAmountStep(currencyCode);
-
-  return (
-    <DialogFrame
-      title={initialTransaction ? "Editar movimiento" : "Nuevo movimiento"}
-      titleId="transaction-dialog-title"
-      onClose={onClose}
-    >
-      <form className="dialog-form" onSubmit={handleSubmit}>
-        <div className="field">
-          <span>Tipo</span>
-          <div className="segmented-control" role="group" aria-label="Tipo de movimiento">
-            <button
-              className={kind === "income" ? "is-selected" : ""}
-              type="button"
-              aria-pressed={kind === "income"}
-              onClick={() => handleKindChange("income")}
-            >
-              Ingreso
-            </button>
-            <button
-              className={kind === "expense" ? "is-selected" : ""}
-              type="button"
-              aria-pressed={kind === "expense"}
-              onClick={() => handleKindChange("expense")}
-            >
-              Gasto
-            </button>
-          </div>
-        </div>
-
-        <label className="field" htmlFor="transaction-description">
-          <span>Descripción</span>
-          <input
-            id="transaction-description"
-            type="text"
-            maxLength="80"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            required
-          />
-        </label>
-
-        <div className="form-row">
-          <label className="field" htmlFor="transaction-amount">
-            <span>Importe ({currencyCode})</span>
-            <input
-              id="transaction-amount"
-              type="number"
-              min="0"
-              step={amountStep}
-              inputMode="decimal"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-              required
-            />
-          </label>
-          <label className="field" htmlFor="transaction-date">
-            <span>Fecha</span>
-            <input
-              id="transaction-date"
-              type="date"
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-              required
-            />
-          </label>
-        </div>
-
-        <label className="field" htmlFor="transaction-category">
-          <span>Categoría</span>
-          <select
-            id="transaction-category"
-            value={categoryId}
-            onChange={(event) => setCategoryId(event.target.value)}
-            required
-          >
-            {matchingCategories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button className="text-button" type="button" onClick={onManageCategories}>
-          Editar categorías
-        </button>
-
-        {error && <p className="field-error" role="alert">{error}</p>}
-        <div className="dialog-actions">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            Cancelar
-          </button>
-          <button className="primary-button" type="submit">
-            Guardar movimiento
-          </button>
-        </div>
-      </form>
-    </DialogFrame>
-  );
-}
-
-function CategoryDialog({ categories, onClose, onSave }) {
-  const [kind, setKind] = useState("payment");
-  const [editingId, setEditingId] = useState(null);
-  const [name, setName] = useState("");
-  const [error, setError] = useState("");
-  const matchingCategories = categories.filter((category) => category.kind === kind);
-
-  function selectKind(nextKind) {
-    setKind(nextKind);
-    setEditingId(null);
-    setName("");
-    setError("");
-  }
-
-  function beginNewCategory() {
-    setEditingId(null);
-    setName("");
-    setError("");
-  }
-
-  function beginEdit(category) {
-    setEditingId(category.id);
-    setName(category.name);
-    setError("");
-  }
-
-  function handleSubmit(event) {
-    event.preventDefault();
-    const normalizedName = name.trim();
-
-    if (!normalizedName) {
-      setError("Escribe un nombre para la categoría.");
-      return;
-    }
-
-    const duplicate = matchingCategories.some(
-      (category) => category.id !== editingId && category.name.toLocaleLowerCase("es-ES") === normalizedName.toLocaleLowerCase("es-ES"),
-    );
-
-    if (duplicate) {
-      setError("Ya existe una categoría con ese nombre.");
-      return;
-    }
-
-    onSave({
-      id: editingId ?? createId("category"),
-      kind,
-      name: normalizedName,
-    });
-    setEditingId(null);
-    setName("");
-    setError("");
-  }
-
-  return (
-    <DialogFrame title="Categorías" titleId="category-dialog-title" onClose={onClose}>
-      <div className="category-dialog-content">
-        <div className="category-toolbar">
-          <div className="segmented-control" role="group" aria-label="Tipo de categoría">
-            <button
-              className={kind === "income" ? "is-selected" : ""}
-              type="button"
-              aria-pressed={kind === "income"}
-              onClick={() => selectKind("income")}
-            >
-              Ingresos
-            </button>
-            <button
-              className={kind === "payment" ? "is-selected" : ""}
-              type="button"
-              aria-pressed={kind === "payment"}
-              onClick={() => selectKind("payment")}
-            >
-              Pagos
-            </button>
-          </div>
-          <button className="secondary-button" type="button" onClick={beginNewCategory}>
-            + Nueva
-          </button>
-        </div>
-
-        <ul className="category-list">
-          {matchingCategories.map((category) => (
-            <li key={category.id}>
-              <span>{category.name}</span>
-              <button className="text-button" type="button" onClick={() => beginEdit(category)}>
-                Editar
-              </button>
-            </li>
-          ))}
-        </ul>
-
-        <form className="category-form" onSubmit={handleSubmit}>
-          <label className="field" htmlFor="category-name">
-            <span>{editingId ? "Nombre de categoría" : "Nueva categoría"}</span>
-            <input
-              id="category-name"
-              type="text"
-              maxLength="40"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              required
-            />
-          </label>
-          {error && <p className="field-error" role="alert">{error}</p>}
-          <div className="category-form-actions">
-            {editingId && (
-              <button className="text-button" type="button" onClick={beginNewCategory}>
-                Cancelar edición
-              </button>
-            )}
-            <button className="primary-button" type="submit">
-              {editingId ? "Guardar cambios" : "Añadir categoría"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </DialogFrame>
-  );
-}
-
-function BackupDialog({
-  financeData,
-  onClose,
-  onImport,
-  parser = parseFinanceBackup,
-  serializer = serializeFinanceBackup,
-}) {
-  const fileInputRef = useRef(null);
-  const [error, setError] = useState("");
-
-  async function handleFileChange(event) {
-    const fileInput = event.currentTarget;
-    const backupFile = fileInput.files?.[0];
-    if (!backupFile) return;
-
-    setError("");
-    let serializedData;
-    try {
-      serializedData = await backupFile.text();
-    } catch {
-      setError("No se pudo leer el archivo seleccionado.");
-      fileInput.value = "";
-      return;
-    }
-
-    fileInput.value = "";
-    const result = parser(serializedData);
-    if (!result.valid) {
-      const errorMessages = {
-        "invalid-json": "El archivo no contiene JSON válido.",
-        "unsupported-version": "La versión de este respaldo no es compatible.",
-        "invalid-data": "La estructura del archivo no coincide con un respaldo válido.",
-      };
-      setError(errorMessages[result.error]);
-      return;
-    }
-
-    const confirmed = window.confirm(
-      "Importar este respaldo reemplazará todos los datos actuales. ¿Quieres continuar?",
-    );
-    if (confirmed) onImport(result.data);
-  }
-
-  function handleExport() {
-    try {
-      downloadFinanceBackup(financeData, serializer);
-      setError("");
-    } catch {
-      setError("No se pudo preparar el archivo de respaldo.");
-    }
-  }
-
-  return (
-    <DialogFrame title="Respaldo" titleId="backup-dialog-title" onClose={onClose}>
-      <div className="backup-dialog-content">
-        <div className="backup-actions">
-          <button className="primary-button" type="button" onClick={handleExport}>
-            Exportar JSON
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            Importar JSON
-          </button>
-          <input
-            ref={fileInputRef}
-            className="visually-hidden"
-            type="file"
-            accept=".json,application/json"
-            aria-label="Archivo de respaldo JSON"
-            onChange={handleFileChange}
-          />
-        </div>
-        {error && <p className="field-error" role="alert">{error}</p>}
-      </div>
-    </DialogFrame>
-  );
-}
-
-function Dashboard({ financeData, setFinanceData, monthKey, setMonthKey, persistenceStatus }) {
-  const [transactionEditor, setTransactionEditor] = useState(null);
-  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
-  const [backupDialogOpen, setBackupDialogOpen] = useState(false);
-  const [backupMessage, setBackupMessage] = useState("");
-  const currencyCode = financeData.settings.currencyCode;
-  const monthTransactions = financeData.transactions
-    .filter((transaction) => transaction.date.slice(0, 7) === monthKey)
-    .sort((first, second) => second.date.localeCompare(first.date));
-  const summary = getMonthSummary(financeData.transactions, monthKey);
-
-  function saveTransaction(transaction) {
-    setFinanceData((currentData) => {
-      const transactionExists = currentData.transactions.some((item) => item.id === transaction.id);
-      return {
-        ...currentData,
-        transactions: transactionExists
-          ? currentData.transactions.map((item) => (item.id === transaction.id ? transaction : item))
-          : [...currentData.transactions, transaction],
-      };
-    });
-    setTransactionEditor(null);
-  }
-
-  function deleteTransaction(transaction) {
-    const confirmed = window.confirm(`¿Eliminar el movimiento «${transaction.description}»?`);
-    if (!confirmed) return;
-
-    setFinanceData((currentData) => ({
-      ...currentData,
-      transactions: currentData.transactions.filter((item) => item.id !== transaction.id),
-    }));
-  }
-
-  function saveCategory(category) {
-    setFinanceData((currentData) => {
-      const categoryExists = currentData.categories.some((item) => item.id === category.id);
-      return {
-        ...currentData,
-        categories: categoryExists
-          ? currentData.categories.map((item) => (item.id === category.id ? category : item))
-          : [...currentData.categories, category],
-      };
-    });
-  }
-
-  function saveBalance(balanceKey, amountMinor) {
-    setFinanceData((currentData) => ({
-      ...currentData,
-      balances: { ...currentData.balances, [balanceKey]: amountMinor },
-    }));
-  }
-
-  function importBackup(importedData) {
-    setFinanceData(importedData);
-    setBackupDialogOpen(false);
-    setBackupMessage("Respaldo importado correctamente.");
-  }
-
-  function updateMonth(amount) {
-    setMonthKey((currentMonth) => shiftMonth(currentMonth, amount));
-  }
-
-  return (
-    <>
-      <main className="workspace">
-        <StorageNotice status={persistenceStatus} />
-        {backupMessage && (
-          <div className="success-notice" role="status">
-            <span>{backupMessage}</span>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Cerrar aviso"
-              title="Cerrar aviso"
-              onClick={() => setBackupMessage("")}
-            >
-              ×
-            </button>
-          </div>
-        )}
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">FINANZAS DEL HOGAR</p>
-            <h1>Resumen mensual</h1>
-          </div>
-          <div className="page-actions">
-            <button className="secondary-button" type="button" onClick={() => setCategoryDialogOpen(true)}>
-              Categorías
-            </button>
-            <button className="secondary-button" type="button" onClick={() => setBackupDialogOpen(true)}>
-              Respaldo
-            </button>
-            <button className="primary-button" type="button" onClick={() => setTransactionEditor({ transaction: null })}>
-              <span aria-hidden="true">+</span> Movimiento
-            </button>
-          </div>
-        </div>
-
-        <div className="month-switcher" aria-label="Periodo del resumen">
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="Mes anterior"
-            title="Mes anterior"
-            onClick={() => updateMonth(-1)}
-          >
-            ‹
-          </button>
-          <strong>{getMonthLabel(monthKey)}</strong>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="Mes siguiente"
-            title="Mes siguiente"
-            onClick={() => updateMonth(1)}
-          >
-            ›
-          </button>
-        </div>
-
-        <section className="summary-grid" aria-label="Resumen financiero">
-          <SummaryCard
-            label="Ingresos"
-            amountMinor={summary.incomeMinor}
-            currencyCode={currencyCode}
-            tone="income-item"
-            detail="Este mes"
-          />
-          <SummaryCard
-            label="Gastos"
-            amountMinor={summary.expenseMinor}
-            currencyCode={currencyCode}
-            tone="expense-item"
-            detail="Este mes"
-          />
-          <SummaryCard
-            label="Balance"
-            amountMinor={summary.balanceMinor}
-            currencyCode={currencyCode}
-            tone="balance-item"
-            detail="Ingresos menos gastos"
-          />
-        </section>
-
-        <section className="balances-section" aria-labelledby="balances-title">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">TOTALES MANUALES</p>
-              <h2 id="balances-title">Ahorros y deudas</h2>
-            </div>
-          </div>
-          <div className="balances-grid">
-            <BalanceEditor
-              label="Ahorro total"
-              amountMinor={financeData.balances.savingsMinor}
-              currencyCode={currencyCode}
-              onSave={(amountMinor) => saveBalance("savingsMinor", amountMinor)}
-            />
-            <BalanceEditor
-              label="Deuda total"
-              amountMinor={financeData.balances.debtMinor}
-              currencyCode={currencyCode}
-              onSave={(amountMinor) => saveBalance("debtMinor", amountMinor)}
-            />
-          </div>
-        </section>
-
-        <section className="activity-section" aria-labelledby="activity-title">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">DETALLE</p>
-              <h2 id="activity-title">Movimientos</h2>
-            </div>
-            <span className="count-label">
-              {monthTransactions.length} {monthTransactions.length === 1 ? "movimiento" : "movimientos"}
-            </span>
-          </div>
-          {monthTransactions.length ? (
-            <ul className="transaction-list">
-              {monthTransactions.map((transaction) => {
-                const category = financeData.categories.find((item) => item.id === transaction.categoryId);
-                const signedAmount = `${transaction.kind === "expense" ? "−" : "+"}${formatMinorAmount(
-                  transaction.amountMinor,
-                  currencyCode,
-                )}`;
-
-                return (
-                  <li className="transaction-row" key={transaction.id}>
-                    <span className={`transaction-mark ${transaction.kind}`} aria-hidden="true">
-                      {transaction.kind === "expense" ? "−" : "+"}
-                    </span>
-                    <div className="transaction-details">
-                      <strong>{transaction.description}</strong>
-                      <span>
-                        {getDateLabel(transaction.date)} · {category?.name ?? "Sin categoría"}
-                      </span>
-                    </div>
-                    <strong className={`transaction-amount ${transaction.kind}`}>{signedAmount}</strong>
-                    <div className="transaction-actions">
-                      <button
-                        className="text-button"
-                        type="button"
-                        onClick={() => setTransactionEditor({ transaction })}
-                      >
-                        Editar
-                      </button>
-                      <button className="text-button danger-text" type="button" onClick={() => deleteTransaction(transaction)}>
-                        Eliminar
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <div className="empty-state">
-              <span className="empty-mark" aria-hidden="true">
-                0
-              </span>
-              <p>{financeData.transactions.length ? "Sin movimientos en este mes" : "Sin movimientos registrados"}</p>
-            </div>
-          )}
-        </section>
-      </main>
-
-      <footer className="app-footer">
-        <span>FINANZAS DEL HOGAR</span>
-        <span>{currencyCode} · USO PERSONAL</span>
-      </footer>
-
-      {transactionEditor && (
-        <TransactionDialog
-          initialTransaction={transactionEditor.transaction}
-          categories={financeData.categories}
-          currencyCode={currencyCode}
-          onClose={() => setTransactionEditor(null)}
-          onSave={saveTransaction}
-          onManageCategories={() => setCategoryDialogOpen(true)}
-        />
-      )}
-      {categoryDialogOpen && (
-        <CategoryDialog
-          categories={financeData.categories}
-          onClose={() => setCategoryDialogOpen(false)}
-          onSave={saveCategory}
-        />
-      )}
-      {backupDialogOpen && (
-        <BackupDialog
-          financeData={financeData}
-          onClose={() => setBackupDialogOpen(false)}
-          onImport={importBackup}
-        />
-      )}
-    </>
-  );
-}
-
-function IncomeDialog({ initialIncome, categories, currencyCode, onClose, onSave }) {
-  const [memberId, setMemberId] = useState(initialIncome?.memberId ?? "lisandro");
-  const [date, setDate] = useState(initialIncome?.date ?? getCurrentDateKey());
-  const [description, setDescription] = useState(initialIncome?.description ?? "");
-  const [amount, setAmount] = useState(
-    initialIncome ? formatMinorInput(initialIncome.amountMinor, currencyCode) : "",
-  );
-  const [categoryId, setCategoryId] = useState(
-    initialIncome?.categoryId ?? categories.find((category) => category.kind === "income")?.id ?? "",
-  );
-  const [error, setError] = useState("");
-  const incomeCategories = categories.filter((category) => category.kind === "income");
-
-  useEffect(() => {
-    if (!incomeCategories.some((category) => category.id === categoryId)) {
-      setCategoryId(incomeCategories[0]?.id ?? "");
-    }
-  }, [categoryId, incomeCategories]);
-
-  function handleSubmit(event) {
-    event.preventDefault();
-
-    let amountMinor;
-    try {
-      amountMinor = parseAmountToMinor(amount, currencyCode);
-    } catch {
-      setError("Introduce un importe válido con la precisión admitida por la moneda.");
-      return;
-    }
-
-    const incomeEntry = {
-      id: initialIncome?.id ?? createId("income"),
-      memberId,
-      date,
-      description: description.trim(),
-      amountMinor,
-      categoryId,
-    };
-
-    if (!incomeEntry.description || !incomeCategories.some((category) => category.id === categoryId)) {
-      setError("Completa la descripción y selecciona una categoría de ingreso.");
-      return;
-    }
-
-    onSave(incomeEntry);
-  }
-
-  return (
-    <DialogFrame
-      title={initialIncome ? "Editar ingreso" : "Nuevo ingreso"}
-      titleId="income-dialog-title"
-      onClose={onClose}
-    >
-      <form className="dialog-form" onSubmit={handleSubmit}>
-        <label className="field" htmlFor="income-member">
-          <span>Integrante</span>
-          <select id="income-member" value={memberId} onChange={(event) => setMemberId(event.target.value)}>
-            <option value="lisandro">Lisandro</option>
-            <option value="catriel">Catriel</option>
-          </select>
-        </label>
-        <label className="field" htmlFor="income-description">
-          <span>Descripción</span>
-          <input
-            id="income-description"
-            type="text"
-            maxLength="80"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            required
-          />
-        </label>
-        <div className="form-row">
-          <label className="field" htmlFor="income-amount">
-            <span>Importe ({currencyCode})</span>
-            <input
-              id="income-amount"
-              type="number"
-              min="0"
-              step={getAmountStep(currencyCode)}
-              inputMode="decimal"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-              required
-            />
-          </label>
-          <label className="field" htmlFor="income-date">
-            <span>Fecha</span>
-            <input
-              id="income-date"
-              type="date"
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-              required
-            />
-          </label>
-        </div>
-        <label className="field" htmlFor="income-category">
-          <span>Categoría</span>
-          <select
-            id="income-category"
-            value={categoryId}
-            onChange={(event) => setCategoryId(event.target.value)}
-            required
-          >
-            {incomeCategories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        {error && <p className="field-error" role="alert">{error}</p>}
-        <div className="dialog-actions">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            Cancelar
-          </button>
-          <button className="primary-button" type="submit">
-            Guardar ingreso
-          </button>
-        </div>
-      </form>
-    </DialogFrame>
-  );
-}
-
-function PaymentPlanDialog({ initialPlan, categories, currencyCode, onClose, onSave }) {
-  const firstPending = initialPlan?.installments.find((installment) => installment.status === "pending");
-  const [description, setDescription] = useState(initialPlan?.description ?? "");
-  const [categoryId, setCategoryId] = useState(
-    initialPlan?.categoryId ?? categories.find((category) => category.kind === "payment")?.id ?? "",
-  );
-  const [responsibility, setResponsibility] = useState(initialPlan?.responsibility ?? "lisandro");
-  const [buyerMemberId, setBuyerMemberId] = useState(
-    initialPlan?.buyerMemberId ?? "lisandro",
-  );
-  const [cardName, setCardName] = useState(initialPlan?.cardName ?? "");
-  const [payerKind, setPayerKind] = useState(initialPlan?.payer.kind ?? "member");
-  const [payerMemberId, setPayerMemberId] = useState(initialPlan?.payer.memberId ?? "lisandro");
-  const [externalPayerName, setExternalPayerName] = useState(initialPlan?.payer.name ?? "");
-  const [currentInstallment, setCurrentInstallment] = useState(String(firstPending?.number ?? 1));
-  const [totalInstallments, setTotalInstallments] = useState(String(firstPending?.total ?? 1));
-  const [firstDueDate, setFirstDueDate] = useState(firstPending?.dueDate ?? getCurrentDateKey());
-  const [amount, setAmount] = useState(
-    firstPending ? formatMinorInput(firstPending.amountMinor, currencyCode) : "",
-  );
-  const [error, setError] = useState("");
-  const paymentCategories = categories.filter((category) => category.kind === "payment");
-  const buyerCards = PAYMENT_CARDS[buyerMemberId] ?? [];
-
-  useEffect(() => {
-    if (!buyerCards.includes(cardName)) setCardName("");
-  }, [buyerCards, cardName]);
-
-  function handleResponsibilityChange(nextResponsibility) {
-    setResponsibility(nextResponsibility);
-    if (nextResponsibility !== "shared") {
-      setBuyerMemberId(nextResponsibility);
-      setCardName("");
-    }
-  }
-
-  function handleSubmit(event) {
-    event.preventDefault();
-
-    let amountMinor;
-    try {
-      amountMinor = parseAmountToMinor(amount, currencyCode);
-    } catch {
-      setError("Introduce un importe válido con la precisión admitida por la moneda.");
-      return;
-    }
-
-    const payer =
-      payerKind === "external"
-        ? { kind: "external", name: externalPayerName.trim() }
-        : { kind: "member", memberId: payerMemberId };
-    const paymentInput = {
-      description: description.trim(),
-      categoryId,
-      responsibility,
-      buyerMemberId,
-      cardName: cardName || null,
-      payer,
-      currentInstallment: Number(currentInstallment),
-      totalInstallments: Number(totalInstallments),
-      firstDueDate,
-      amountMinor,
-    };
-
-    try {
-      if (initialPlan) {
-        const result = editPaymentPlan(initialPlan, paymentInput, categories);
-        if (!result.valid) {
-          setError("El total de cuotas no puede eliminar cuotas ya pagadas.");
-          return;
-        }
-        onSave(result.plan);
-      } else {
-        onSave(createPaymentPlan(paymentInput, categories));
+import React, { useState, useEffect } from 'react';
+
+export default function App() {
+  const [mesSeleccionado, setMesSeleccionado] = useState('2026-10');
+
+  // ALMACENAMIENTO PERMANENTE LOCAL
+  const STORAGE_KEY = 'finanzas_hogar_v2';
+
+  const [data, setData] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Error leyendo localStorage:', e);
       }
-    } catch {
-      setError("Revisa los datos, la tarjeta y las cuotas del plan.");
     }
-  }
+
+    return {
+      ingresos: [],
+      ahorros: [],
+      gastosLisandro: [],
+      gastosCatriel: [],
+      gastosCompartidos: [
+        { id: 1, descripcion: 'Alquiler', monto: 150000, mes: '2026-10' },
+        { id: 2, descripcion: 'Expensas', monto: 30000, mes: '2026-10' }
+      ],
+      tarjetas: [
+        { id: 1, nombre: 'NACION - VISA', titular: 'Catriel' },
+        { id: 2, nombre: 'NACION - Mastercard', titular: 'Lisandro' }
+      ],
+      consumosTarjetas: [],
+      prestamos: []
+    };
+  });
+
+  const [itemEditando, setItemEditando] = useState(null);
+
+  // Forms
+  const [usuarioConsumo, setUsuarioConsumo] = useState('Catriel');
+  const [nuevoConsumo, setNuevoConsumo] = useState({ tarjetaId: '', descripcion: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 1, quienPaga: 'Catriel', pagadorOtroTexto: '' });
+  const [nuevoIngreso, setNuevoIngreso] = useState({ usuario: 'Catriel', monto: '', descripcion: '' });
+  const [nuevoGastoCompartido, setNuevoGastoCompartido] = useState({ descripcion: '', monto: '' });
+  const [nuevoGastoInd, setNuevoGastoInd] = useState({ usuario: 'Catriel', descripcion: '', monto: '' });
+  const [nuevaTarjeta, setNuevaTarjeta] = useState({ nombre: '', titular: 'Catriel' });
+  const [nuevoPrestamo, setNuevoPrestamo] = useState({ entidad: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 12, quienPaga: 'Compartido', pagadorOtroTexto: '' });
+
+  // Guardar en localStorage
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }, [data]);
+
+  // COPIA DE SEGURIDAD INDEPENDIENTE AL CAMBIAR DE MES
+  useEffect(() => {
+    const gastosComp = data.gastosCompartidos || [];
+    const hayGastosEnMesActual = gastosComp.some(g => g.mes === mesSeleccionado);
+
+    // Si el mes está totalmente vacío, busca los datos del mes anterior y los clona
+    if (!hayGastosEnMesActual && gastosComp.length > 0) {
+      // Obtener meses únicos ordenados
+      const mesesExistentes = Array.from(new Set(gastosComp.map(g => g.mes))).sort();
+      const mesesAnteriores = mesesExistentes.filter(m => m < mesSeleccionado);
+
+      if (mesesAnteriores.length > 0) {
+        const ultimoMesDisponible = mesesAnteriores[mesesAnteriores.length - 1];
+        const gastosUltimoMes = gastosComp.filter(g => g.mes === ultimoMesDisponible);
+
+        const gastosClonados = gastosUltimoMes.map((g, idx) => ({
+          id: Date.now() + idx,
+          descripcion: g.descripcion,
+          monto: g.monto,
+          mes: mesSeleccionado // Asigna el mes nuevo pero NO altera el viejo
+        }));
+
+        setData(prev => ({
+          ...prev,
+          gastosCompartidos: [...(prev.gastosCompartidos || []), ...gastosClonados]
+        }));
+      }
+    }
+  }, [mesSeleccionado]);
+
+  const formatoMoneda = (val) => new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(val || 0);
+
+  const calcularDiferenciaMeses = (mesInicio, mesActual) => {
+    if (!mesInicio || !mesActual) return 0;
+    const [a1, m1] = mesInicio.split('-').map(Number);
+    const [a2, m2] = mesActual.split('-').map(Number);
+    return (a2 - a1) * 12 + (m2 - m1);
+  };
+
+  // --- HANDLERS ---
+  const agregarIngreso = (e) => {
+    e.preventDefault();
+    if (!nuevoIngreso.monto || !nuevoIngreso.descripcion) return;
+    const item = { id: Date.now(), usuario: nuevoIngreso.usuario, monto: parseFloat(nuevoIngreso.monto), descripcion: nuevoIngreso.descripcion, mes: mesSeleccionado };
+    setData({ ...data, ingresos: [...(data.ingresos || []), item] });
+    setNuevoIngreso({ ...nuevoIngreso, monto: '', descripcion: '' });
+  };
+
+  const guardarAhorro = (usuario, monto) => {
+    const otrosAhorros = (data.ahorros || []).filter(a => !(a.usuario === usuario && a.mes === mesSeleccionado));
+    const nuevo = { id: Date.now(), usuario, monto: parseFloat(monto) || 0, mes: mesSeleccionado };
+    setData({ ...data, ahorros: [...otrosAhorros, nuevo] });
+  };
+
+  const agregarGastoCompartido = (e) => {
+    e.preventDefault();
+    if (!nuevoGastoCompartido.monto || !nuevoGastoCompartido.descripcion) return;
+    const nuevoGasto = { id: Date.now(), descripcion: nuevoGastoCompartido.descripcion, monto: parseFloat(nuevoGastoCompartido.monto), mes: mesSeleccionado };
+    setData({ ...data, gastosCompartidos: [...(data.gastosCompartidos || []), nuevoGasto] });
+    setNuevoGastoCompartido({ descripcion: '', monto: '' });
+  };
+
+  const agregarGastoInd = (e) => {
+    e.preventDefault();
+    if (!nuevoGastoInd.monto || !nuevoGastoInd.descripcion) return;
+    const item = { id: Date.now(), descripcion: nuevoGastoInd.descripcion, monto: parseFloat(nuevoGastoInd.monto), mes: mesSeleccionado };
+    if (nuevoGastoInd.usuario === 'Catriel') {
+      setData({ ...data, gastosCatriel: [...(data.gastosCatriel || []), item] });
+    } else {
+      setData({ ...data, gastosLisandro: [...(data.gastosLisandro || []), item] });
+    }
+    setNuevoGastoInd({ ...nuevoGastoInd, monto: '', descripcion: '' });
+  };
+
+  const agregarTarjeta = (e) => {
+    e.preventDefault();
+    if (!nuevaTarjeta.nombre.trim()) return;
+    const nueva = { id: Date.now(), nombre: nuevaTarjeta.nombre, titular: nuevaTarjeta.titular };
+    setData({ ...data, tarjetas: [...(data.tarjetas || []), nueva] });
+    setNuevaTarjeta({ nombre: '', titular: 'Catriel' });
+  };
+
+  const agregarConsumoTarjeta = (e) => {
+    e.preventDefault();
+    if (!nuevoConsumo.tarjetaId || !nuevoConsumo.montoCuota || !nuevoConsumo.descripcion) return;
+    const consumo = {
+      id: Date.now(),
+      tarjetaId: parseInt(nuevoConsumo.tarjetaId),
+      descripcion: nuevoConsumo.descripcion,
+      montoCuota: parseFloat(nuevoConsumo.montoCuota),
+      cuotaInicioMes: mesSeleccionado,
+      cuotaActualNumero: parseInt(nuevoConsumo.cuotaActual) || 1,
+      cuotasTotales: parseInt(nuevoConsumo.cuotasTotales) || 1,
+      quienPaga: nuevoConsumo.quienPaga,
+      pagadorDetalle: nuevoConsumo.quienPaga === 'Otro' ? nuevoConsumo.pagadorOtroTexto : ''
+    };
+    setData({ ...data, consumosTarjetas: [...(data.consumosTarjetas || []), consumo] });
+    setNuevoConsumo({ tarjetaId: '', descripcion: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 1, quienPaga: 'Catriel', pagadorOtroTexto: '' });
+  };
+
+  const agregarPrestamo = (e) => {
+    e.preventDefault();
+    if (!nuevoPrestamo.entidad.trim() || !nuevoPrestamo.montoCuota) return;
+    const p = {
+      id: Date.now(),
+      entidad: nuevoPrestamo.entidad,
+      montoCuota: parseFloat(nuevoPrestamo.montoCuota),
+      cuotaInicioMes: mesSeleccionado,
+      cuotaActualNumero: parseInt(nuevoPrestamo.cuotaActual) || 1,
+      cuotasTotales: parseInt(nuevoPrestamo.cuotasTotales) || 1,
+      quienPaga: nuevoPrestamo.quienPaga,
+      pagadorDetalle: nuevoPrestamo.quienPaga === 'Otro' ? nuevoPrestamo.pagadorOtroTexto : ''
+    };
+    setData({ ...data, prestamos: [...(data.prestamos || []), p] });
+    setNuevoPrestamo({ entidad: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 12, quienPaga: 'Compartido', pagadorOtroTexto: '' });
+  };
+
+  const eliminarItem = (coleccion, id) => {
+    if (window.confirm('¿Seguro que querés borrar este registro?')) {
+      if (coleccion === 'tarjetas') {
+        setData({
+          ...data,
+          tarjetas: (data.tarjetas || []).filter(t => t.id !== id),
+          consumosTarjetas: (data.consumosTarjetas || []).filter(c => c.tarjetaId !== id)
+        });
+      } else {
+        setData({
+          ...data,
+          [coleccion]: (data[coleccion] || []).filter(i => i.id !== id)
+        });
+      }
+    }
+  };
+
+  const guardarEdicion = (e) => {
+    e.preventDefault();
+    const { tipo, item } = itemEditando;
+    setData({
+      ...data,
+      [tipo]: (data[tipo] || []).map(i => i.id === item.id ? item : i)
+    });
+    setItemEditando(null);
+  };
+
+  // --- FILTRADOS MES ---
+  const ingresosFiltrados = (data.ingresos || []).filter(i => i.mes === mesSeleccionado);
+  const gastosCompartidosFiltrados = (data.gastosCompartidos || []).filter(g => g.mes === mesSeleccionado);
+  const gastosCatrielFiltrados = (data.gastosCatriel || []).filter(g => g.mes === mesSeleccionado);
+  const gastosLisandroFiltrados = (data.gastosLisandro || []).filter(g => g.mes === mesSeleccionado);
+
+  const ingresosCatriel = ingresosFiltrados.filter(i => i.usuario === 'Catriel');
+  const ingresosLisandro = ingresosFiltrados.filter(i => i.usuario === 'Lisandro');
+
+  const totalIngresosCatriel = ingresosCatriel.reduce((a, b) => a + b.monto, 0);
+  const totalIngresosLisandro = ingresosLisandro.reduce((a, b) => a + b.monto, 0);
+
+  const ahorroCatrielObj = (data.ahorros || []).find(a => a.usuario === 'Catriel' && a.mes === mesSeleccionado);
+  const ahorroLisandroObj = (data.ahorros || []).find(a => a.usuario === 'Lisandro' && a.mes === mesSeleccionado);
+
+  const ahorroCatriel = ahorroCatrielObj ? ahorroCatrielObj.monto : 0;
+  const ahorroLisandro = ahorroLisandroObj ? ahorroLisandroObj.monto : 0;
+
+  const totalCompartidoGeneral = gastosCompartidosFiltrados.reduce((a, b) => a + b.monto, 0);
+  const cuotaCompartidaIndividual = totalCompartidoGeneral / 2;
+
+  const totalIndCatriel = gastosCatrielFiltrados.reduce((a, b) => a + b.monto, 0);
+  const totalIndLisandro = gastosLisandroFiltrados.reduce((a, b) => a + b.monto, 0);
+
+  const obtenerConsumosActivosPorMes = (tarjetaId) => {
+    return (data.consumosTarjetas || []).map(c => {
+      if (c.tarjetaId !== tarjetaId) return null;
+      const diff = calcularDiferenciaMeses(c.cuotaInicioMes, mesSeleccionado);
+      const cuotaEnEsteMes = c.cuotaActualNumero + diff;
+      if (cuotaEnEsteMes >= 1 && cuotaEnEsteMes <= c.cuotasTotales) {
+        return { ...c, cuotaRender: cuotaEnEsteMes };
+      }
+      return null;
+    }).filter(Boolean);
+  };
+
+  const obtenerPrestamosActivosPorMes = () => {
+    return (data.prestamos || []).map(p => {
+      const diff = calcularDiferenciaMeses(p.cuotaInicioMes, mesSeleccionado);
+      const cuotaEnEsteMes = p.cuotaActualNumero + diff;
+      if (cuotaEnEsteMes >= 1 && cuotaEnEsteMes <= p.cuotasTotales) {
+        return { ...p, cuotaRender: cuotaEnEsteMes };
+      }
+      return null;
+    }).filter(Boolean);
+  };
+
+  const prestamosActivos = obtenerPrestamosActivosPorMes();
+  const prestamosLisandro = prestamosActivos.filter(p => p.quienPaga === 'Lisandro');
+  const prestamosCatriel = prestamosActivos.filter(p => p.quienPaga === 'Catriel');
+  const prestamosCompartidos = prestamosActivos.filter(p => p.quienPaga === 'Compartido');
+
+  const tarjetasCatriel = (data.tarjetas || []).filter(t => t.titular === 'Catriel');
+  const tarjetasLisandro = (data.tarjetas || []).filter(t => t.titular === 'Lisandro');
+  const tarjetasDelUsuarioActual = (data.tarjetas || []).filter(t => t.titular === usuarioConsumo);
+
+  // DETALLE TARJETAS COMPARTIDAS
+  const consumosTarjetasCompartidosLisandro = tarjetasLisandro.reduce((total, t) => {
+    const consumos = obtenerConsumosActivosPorMes(t.id).filter(c => c.quienPaga === 'Compartido');
+    return total + consumos.reduce((a, b) => a + b.montoCuota, 0);
+  }, 0);
+
+  const consumosTarjetasCompartidosCatriel = tarjetasCatriel.reduce((total, t) => {
+    const consumos = obtenerConsumosActivosPorMes(t.id).filter(c => c.quienPaga === 'Compartido');
+    return total + consumos.reduce((a, b) => a + b.montoCuota, 0);
+  }, 0);
+
+  const totalTarjetasCompartido = consumosTarjetasCompartidosLisandro + consumosTarjetasCompartidosCatriel;
+  const cuotaPagaCadaUnoTarjetas = totalTarjetasCompartido / 2;
+
+  const diferenciaTarjetas = consumosTarjetasCompartidosCatriel - consumosTarjetasCompartidosLisandro;
+  const montoAjusteTarjetas = Math.abs(diferenciaTarjetas) / 2;
+
+  // DESGLOSE CARGO JUSTO PROPIO
+  const obtenerDesgloseExclusivoPorTarjeta = (usuario) => {
+    const desglose = [];
+    (data.tarjetas || []).forEach(t => {
+      const consumos = obtenerConsumosActivosPorMes(t.id);
+      let montoPropioEnTarjeta = 0;
+
+      consumos.forEach(c => {
+        if (c.quienPaga === usuario) {
+          montoPropioEnTarjeta += c.montoCuota;
+        }
+      });
+
+      if (montoPropioEnTarjeta > 0) {
+        const esTarjetaAjena = t.titular !== usuario;
+        desglose.push({
+          nombre: t.nombre,
+          titular: t.titular,
+          monto: montoPropioEnTarjeta,
+          esTarjetaAjena
+        });
+      }
+    });
+
+    return desglose;
+  };
+
+  const desgloseTarjetasCatriel = obtenerDesgloseExclusivoPorTarjeta('Catriel');
+  const desgloseTarjetasLisandro = obtenerDesgloseExclusivoPorTarjeta('Lisandro');
+
+  const pagoExclusivoTarjetasCatriel = desgloseTarjetasCatriel.reduce((a, b) => a + b.monto, 0);
+  const pagoExclusivoTarjetasLisandro = desgloseTarjetasLisandro.reduce((a, b) => a + b.monto, 0);
+
+  const calcularPagoRealTarjetasBalance = (usuario) => {
+    let total = 0;
+    (data.tarjetas || []).forEach(t => {
+      const consumos = obtenerConsumosActivosPorMes(t.id);
+      consumos.forEach(c => {
+        if (c.quienPaga === usuario) {
+          total += c.montoCuota;
+        } else if (c.quienPaga === 'Compartido') {
+          total += c.montoCuota / 2;
+        }
+      });
+    });
+    return total;
+  };
+
+  const pagoBalanceTarjetasCatriel = calcularPagoRealTarjetasBalance('Catriel');
+  const pagoBalanceTarjetasLisandro = calcularPagoRealTarjetasBalance('Lisandro');
+
+  // DEUDORES / TERCEROS
+  const obtenerCobrosTerceros = (titularBuscado) => {
+    const deudores = {};
+    const tarjetasDelTitular = (data.tarjetas || []).filter(t => t.titular === titularBuscado);
+
+    tarjetasDelTitular.forEach(t => {
+      const consumos = obtenerConsumosActivosPorMes(t.id);
+      consumos.forEach(c => {
+        if (c.quienPaga === 'Otro' && c.pagadorDetalle.trim() !== '') {
+          const nombre = c.pagadorDetalle.trim();
+          deudores[nombre] = (deudores[nombre] || 0) + c.montoCuota;
+        }
+      });
+    });
+
+    return deudores;
+  };
+
+  const deudoresCatriel = obtenerCobrosTerceros('Catriel');
+  const deudoresLisandro = obtenerCobrosTerceros('Lisandro');
+
+  // COMBUSTIBLE
+  const obtenerCombustibleUsuario = (usuario) => {
+    let total = 0;
+    (data.tarjetas || []).forEach(t => {
+      const consumos = obtenerConsumosActivosPorMes(t.id);
+      consumos.forEach(c => {
+        if (c.descripcion.toLowerCase().includes('combustible')) {
+          if (c.quienPaga === usuario) total += c.montoCuota;
+          else if (c.quienPaga === 'Compartido') total += c.montoCuota / 2;
+        }
+      });
+    });
+
+    const fijos = usuario === 'Catriel' ? gastosCatrielFiltrados : gastosLisandroFiltrados;
+    fijos.forEach(g => {
+      if (g.descripcion.toLowerCase().includes('combustible')) total += g.monto;
+    });
+
+    return total;
+  };
+
+  const combustibleCatriel = obtenerCombustibleUsuario('Catriel');
+  const combustibleLisandro = obtenerCombustibleUsuario('Lisandro');
+
+  const totalPrestamosCompartidos = prestamosCompartidos.reduce((a, b) => a + b.montoCuota, 0);
+  const totalPrestamosPropioCatriel = prestamosCatriel.reduce((a, b) => a + b.montoCuota, 0);
+  const totalPrestamosPropioLisandro = prestamosLisandro.reduce((a, b) => a + b.montoCuota, 0);
+
+  // RESUMEN Y BALANCE NETO
+  const gastosTotalesCatriel = totalIndCatriel + pagoBalanceTarjetasCatriel + cuotaCompartidaIndividual + (totalPrestamosCompartidos / 2) + totalPrestamosPropioCatriel;
+  const gastosTotalesLisandro = totalIndLisandro + pagoBalanceTarjetasLisandro + cuotaCompartidaIndividual + (totalPrestamosCompartidos / 2) + totalPrestamosPropioLisandro;
+
+  const disponibleCatriel = totalIngresosCatriel - gastosTotalesCatriel - ahorroCatriel;
+  const disponibleLisandro = totalIngresosLisandro - gastosTotalesLisandro - ahorroLisandro;
 
   return (
-    <DialogFrame
-      title={initialPlan ? "Editar plan de pago" : "Nuevo plan de pago"}
-      titleId="payment-plan-dialog-title"
-      onClose={onClose}
-    >
-      <form className="dialog-form" onSubmit={handleSubmit}>
-        <label className="field" htmlFor="payment-description">
-          <span>Descripción</span>
-          <input
-            id="payment-description"
-            type="text"
-            maxLength="80"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            required
-          />
-        </label>
-        <label className="field" htmlFor="payment-category">
-          <span>Categoría</span>
-          <select
-            id="payment-category"
-            value={categoryId}
-            onChange={(event) => setCategoryId(event.target.value)}
-            required
-          >
-            {paymentCategories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field" htmlFor="payment-responsibility">
-          <span>Responsable</span>
-          <select
-            id="payment-responsibility"
-            value={responsibility}
-            onChange={(event) => handleResponsibilityChange(event.target.value)}
-          >
-            <option value="lisandro">Lisandro</option>
-            <option value="shared">Compartido · 50% cada uno</option>
-            <option value="catriel">Catriel</option>
-          </select>
-        </label>
-        <div className="form-row">
-          <label className="field" htmlFor="payment-buyer">
-            <span>Persona compradora</span>
-            <select
-              id="payment-buyer"
-              value={buyerMemberId}
-              disabled={responsibility !== "shared"}
-              onChange={(event) => {
-                setBuyerMemberId(event.target.value);
-                setCardName("");
-              }}
-            >
-              <option value="lisandro">Lisandro</option>
-              <option value="catriel">Catriel</option>
-            </select>
-          </label>
-          <label className="field" htmlFor="payment-card">
-            <span>Tarjeta</span>
-            <select id="payment-card" value={cardName} onChange={(event) => setCardName(event.target.value)}>
-              <option value="">Sin tarjeta</option>
-              {buyerCards.map((card) => (
-                <option key={card} value={card}>
-                  {card}
-                </option>
-              ))}
-            </select>
-          </label>
+    <div style={{ fontFamily: 'system-ui, -apple-system, sans-serif', backgroundColor: '#f1f5f9', minHeight: '100vh', padding: '20px' }}>
+      
+      {/* CABECERA */}
+      <header style={{ maxWidth: '1400px', margin: '0 auto 24px auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px', backgroundColor: '#ffffff', padding: '16px 24px', borderRadius: '16px', border: '1px solid #e2e8f0' }}>
+        <div>
+          <h1 style={{ margin: 0, color: '#0f172a', fontSize: '24px' }}>🏡 Dashboard Financiero del Hogar</h1>
+          <p style={{ margin: '4px 0 0 0', color: '#64748b', fontSize: '14px' }}>Vista Dividida: Lisandro (Izq) | Compartido (Centro) | Catriel (Der)</p>
         </div>
-        <div className="form-row">
-          <label className="field" htmlFor="payment-payer-kind">
-            <span>Quién paga</span>
-            <select id="payment-payer-kind" value={payerKind} onChange={(event) => setPayerKind(event.target.value)}>
-              <option value="member">Integrante</option>
-              <option value="external">Externo</option>
-            </select>
-          </label>
-          {payerKind === "member" ? (
-            <label className="field" htmlFor="payment-payer-member">
-              <span>Pagador</span>
-              <select
-                id="payment-payer-member"
-                value={payerMemberId}
-                onChange={(event) => setPayerMemberId(event.target.value)}
-              >
-                <option value="lisandro">Lisandro</option>
-                <option value="catriel">Catriel</option>
-              </select>
-            </label>
-          ) : (
-            <label className="field" htmlFor="payment-payer-name">
-              <span>Nombre del pagador</span>
-              <input
-                id="payment-payer-name"
-                type="text"
-                value={externalPayerName}
-                onChange={(event) => setExternalPayerName(event.target.value)}
-                required
-              />
-            </label>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: '#f8fafc', padding: '8px 16px', borderRadius: '12px', border: '1px solid #cbd5e1' }}>
+          <label style={{ fontWeight: 'bold', color: '#334155', fontSize: '14px' }}>📅 Período:</label>
+          <input
+            type="month"
+            value={mesSeleccionado}
+            onChange={(e) => setMesSeleccionado(e.target.value)}
+            style={{ padding: '6px 10px', borderRadius: '8px', border: '1px solid #94a3b8', fontSize: '14px', fontWeight: 'bold', color: '#0f172a', cursor: 'pointer' }}
+          />
+        </div>
+      </header>
+
+      {/* TRES COLUMNAS PRINCIPALES */}
+      <div style={{ maxWidth: '1400px', margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '20px', alignItems: 'start' }}>
+
+        {/* ================= COLUMNA 1: LISANDRO ================= */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ backgroundColor: '#e0f2fe', border: '2px solid #38bdf8', borderRadius: '16px', padding: '16px' }}>
+            <h2 style={{ margin: '0 0 12px 0', color: '#0369a1', fontSize: '20px' }}>👤 LISANDRO</h2>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
+              <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', padding: '12px', border: '1px solid #bae6fd' }}>
+                <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#0284c7', display: 'block' }}>INGRESOS</span>
+                {ingresosLisandro.map(ing => (
+                  <div key={ing.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', fontSize: '12px' }}>
+                    <span>{ing.descripcion}</span>
+                    <div>
+                      <strong style={{ color: '#0369a1', marginRight: '4px' }}>{formatoMoneda(ing.monto)}</strong>
+                      <button onClick={() => setItemEditando({ tipo: 'ingresos', item: ing })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '10px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('ingresos', ing.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '10px' }}>🗑️</button>
+                    </div>
+                  </div>
+                ))}
+                <div style={{ borderTop: '1px solid #f1f5f9', marginTop: '6px', paddingTop: '4px', textAlign: 'right', fontSize: '11px' }}>
+                  <strong>Tot: {formatoMoneda(totalIngresosLisandro)}</strong>
+                </div>
+              </div>
+
+              <div style={{ backgroundColor: '#f0f9ff', borderRadius: '12px', padding: '12px', border: '2px solid #38bdf8' }}>
+                <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#0369a1', display: 'block' }}>🐷 AHORRO</span>
+                <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#0284c7', marginTop: '4px' }}>
+                  {formatoMoneda(ahorroLisandro)}
+                </div>
+                <input
+                  type="number"
+                  placeholder="Editar $"
+                  onBlur={e => e.target.value !== '' && guardarAhorro('Lisandro', e.target.value)}
+                  style={{ width: '80%', padding: '2px 4px', marginTop: '4px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '11px' }}
+                />
+              </div>
+            </div>
+
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', padding: '12px', border: '1px solid #bae6fd' }}>
+              <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#64748b', display: 'block', marginBottom: '8px' }}>GASTOS PROPIOS LISANDRO</span>
+              {gastosLisandroFiltrados.map(g => (
+                <div key={g.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', fontSize: '13px' }}>
+                  <span>{g.descripcion}</span>
+                  <div>
+                    <strong style={{ marginRight: '8px' }}>{formatoMoneda(g.monto)}</strong>
+                    <button onClick={() => setItemEditando({ tipo: 'gastosLisandro', item: g })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
+                    <button onClick={() => eliminarItem('gastosLisandro', g.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+                  </div>
+                </div>
+              ))}
+              <div style={{ marginTop: '8px', textAlign: 'right', fontSize: '12px' }}>
+                <span>Subtotal Propio: <strong>{formatoMoneda(totalIndLisandro)}</strong></span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '1px solid #bae6fd' }}>
+            <h3 style={{ margin: '0 0 12px 0', color: '#0369a1', fontSize: '16px' }}>💳 Tarjetas de Lisandro</h3>
+            {tarjetasLisandro.map(t => {
+              const consumos = obtenerConsumosActivosPorMes(t.id);
+              const totalResumen = consumos.reduce((a, b) => a + b.montoCuota, 0);
+
+              return (
+                <div key={t.id} style={{ border: '1px solid #bae6fd', borderRadius: '12px', padding: '12px', marginBottom: '12px', backgroundColor: '#f0f9ff' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <strong style={{ color: '#0369a1' }}>💳 {t.nombre}</strong>
+                    <div>
+                      <button onClick={() => setItemEditando({ tipo: 'tarjetas', item: t })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('tarjetas', t.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '8px' }}>
+                    Total Resumen Mes: <strong style={{ color: '#0369a1' }}>{formatoMoneda(totalResumen)}</strong>
+                  </div>
+
+                  {consumos.map(c => (
+                    <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', padding: '6px 8px', borderRadius: '6px', fontSize: '12px', marginBottom: '4px' }}>
+                      <div>
+                        <span>{c.descripcion}</span>
+                        <span style={{ color: '#0284c7', fontSize: '10px', marginLeft: '6px', fontWeight: 'bold' }}>
+                          (Cuota {c.cuotaRender}/{c.cuotasTotales})
+                        </span>
+                        <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>
+                          Paga: <strong>{c.quienPaga === 'Otro' ? c.pagadorDetalle : c.quienPaga}</strong>
+                        </span>
+                      </div>
+                      <div>
+                        <strong style={{ marginRight: '6px' }}>{formatoMoneda(c.montoCuota)}</strong>
+                        <button onClick={() => setItemEditando({ tipo: 'consumosTarjetas', item: c })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>✏️</button>
+                        <button onClick={() => eliminarItem('consumosTarjetas', c.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>🗑️</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          {prestamosLisandro.length > 0 && (
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '2px solid #a855f7' }}>
+              <h3 style={{ margin: '0 0 12px 0', color: '#6b21a8', fontSize: '15px' }}>🏦 Préstamos de Lisandro</h3>
+              {prestamosLisandro.map(p => (
+                <div key={p.id} style={{ border: '1px solid #e9d5ff', backgroundColor: '#faf5ff', padding: '10px', borderRadius: '8px', fontSize: '12px', marginBottom: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ color: '#6b21a8' }}>{p.entidad}</strong>
+                    <div>
+                      <strong style={{ marginRight: '6px' }}>{formatoMoneda(p.montoCuota)}</strong>
+                      <button onClick={() => setItemEditando({ tipo: 'prestamos', item: p })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('prestamos', p.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>🗑️</button>
+                    </div>
+                  </div>
+                  <span style={{ color: '#64748b', fontSize: '10px' }}>Cuota {p.cuotaRender} de {p.cuotasTotales}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {Object.keys(deudoresLisandro).length > 0 && (
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '2px solid #38bdf8' }}>
+              <h3 style={{ margin: '0 0 8px 0', color: '#0369a1', fontSize: '15px' }}>📌 Le deben a Lisandro (Tarjetas)</h3>
+              {Object.entries(deudoresLisandro).map(([nombre, monto]) => (
+                <div key={nombre} style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#f0f9ff', padding: '8px 12px', borderRadius: '8px', fontSize: '13px', marginTop: '6px' }}>
+                  <span style={{ fontWeight: 'bold', color: '#0369a1' }}>{nombre}</span>
+                  <strong style={{ color: '#0284c7' }}>{formatoMoneda(monto)}</strong>
+                </div>
+              ))}
+            </div>
           )}
         </div>
-        <div className="form-row payment-installments-row">
-          <label className="field" htmlFor="payment-current-installment">
-            <span>Cuota actual</span>
-            <input
-              id="payment-current-installment"
-              type="number"
-              min={firstPending?.number ?? 1}
-              max={totalInstallments}
-              value={currentInstallment}
-              disabled={Boolean(initialPlan)}
-              onChange={(event) => setCurrentInstallment(event.target.value)}
-              required
-            />
-          </label>
-          <label className="field" htmlFor="payment-total-installments">
-            <span>Total de cuotas</span>
-            <input
-              id="payment-total-installments"
-              type="number"
-              min={currentInstallment}
-              value={totalInstallments}
-              onChange={(event) => setTotalInstallments(event.target.value)}
-              required
-            />
-          </label>
-          <label className="field" htmlFor="payment-amount">
-            <span>Importe de cada cuota ({currencyCode})</span>
-            <input
-              id="payment-amount"
-              type="number"
-              min="0"
-              step={getAmountStep(currencyCode)}
-              inputMode="decimal"
-              value={amount}
-              onChange={(event) => setAmount(event.target.value)}
-              required
-            />
-          </label>
-        </div>
-        <label className="field" htmlFor="payment-first-due-date">
-          <span>Fecha de vencimiento</span>
-          <input
-            id="payment-first-due-date"
-            type="date"
-            value={firstDueDate}
-            onChange={(event) => setFirstDueDate(event.target.value)}
-            required
-          />
-        </label>
-        {error && <p className="field-error" role="alert">{error}</p>}
-        <div className="dialog-actions">
-          <button className="secondary-button" type="button" onClick={onClose}>
-            Cancelar
-          </button>
-          <button className="primary-button" type="submit">
-            Guardar plan
-          </button>
-        </div>
-      </form>
-    </DialogFrame>
-  );
-}
 
-function IncomeEntries({ entries, categories, currencyCode, onEdit, onDelete }) {
-  if (entries.length === 0) {
-    return <p className="panel-empty">Sin ingresos registrados este mes</p>;
-  }
+        {/* ================= COLUMNA 2: CENTRO ================= */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          
+          {/* GASTOS COMPARTIDOS */}
+          <div style={{ backgroundColor: '#fef3c7', border: '2px solid #f59e0b', borderRadius: '16px', padding: '16px' }}>
+            <h2 style={{ margin: '0 0 12px 0', color: '#b45309', fontSize: '20px', textAlign: 'center' }}>🤝 GASTOS COMPARTIDOS (50 / 50)</h2>
 
-  return (
-    <ul className="panel-entry-list income-entry-list">
-      {entries.map((entry) => {
-        const category = categories.find((item) => item.id === entry.categoryId);
-        return (
-          <li className="income-entry" key={entry.id}>
-            <div className="entry-copy">
-              <strong>{entry.description}</strong>
-              <span>{getDateLabel(entry.date)} · {category?.name ?? "Sin categoría"}</span>
-            </div>
-            <strong className="income-value">{formatMinorAmount(entry.amountMinor, currencyCode)}</strong>
-            <div className="entry-actions">
-              <button className="text-button" type="button" onClick={() => onEdit(entry)}>
-                Editar
-              </button>
-              <button className="text-button danger-text" type="button" onClick={() => onDelete(entry)}>
-                Eliminar
-              </button>
-            </div>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-function PaymentEntries({ entries, categories, currencyCode, onEdit, onMarkPaid, onCancel }) {
-  if (entries.length === 0) {
-    return <p className="panel-empty">Sin pagos para este mes</p>;
-  }
-
-  return (
-    <ul className="panel-entry-list payment-entry-list">
-      {entries.map(({ plan, installment }) => {
-        const category = categories.find((item) => item.id === plan.categoryId);
-        const payerName =
-          plan.payer.kind === "external"
-            ? plan.payer.name
-            : plan.payer.memberId === "lisandro"
-              ? "Lisandro"
-              : "Catriel";
-        const hasPendingInstallments = plan.installments.some((item) => item.status === "pending");
-
-        return (
-          <li className={`payment-entry ${installment.status}`} key={installment.id}>
-            <div className="entry-copy">
-              <div className="payment-entry-title">
-                <strong>{plan.description}</strong>
-                <span className={`status-pill ${installment.status}`}>
-                  {installment.status === "paid" ? "Pagada" : "Pendiente"}
-                </span>
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', padding: '16px', border: '1px solid #fde68a', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '2px solid #fef3c7', paddingBottom: '8px', marginBottom: '12px' }}>
+                <span style={{ fontWeight: 'bold', color: '#78350f' }}>Concepto</span>
+                <span style={{ fontWeight: 'bold', color: '#78350f' }}>Monto Total</span>
               </div>
-              <span>
-                {getDateLabel(installment.dueDate)} · Cuota {installment.number}/{installment.total}
-              </span>
-              <span>
-                {category?.name ?? "Sin categoría"} · {plan.cardName ?? "Sin tarjeta"} · Paga {payerName}
-              </span>
-            </div>
-            <strong className="payment-value">{formatMinorAmount(installment.amountMinor, currencyCode)}</strong>
-            <div className="entry-actions payment-entry-actions">
-              {installment.status === "pending" && (
-                <button className="text-button" type="button" onClick={() => onMarkPaid(plan, installment)}>
-                  Marcar pagada
-                </button>
-              )}
-              {hasPendingInstallments && (
-                <button className="text-button" type="button" onClick={() => onEdit(plan)}>
-                  Editar
-                </button>
-              )}
-              {hasPendingInstallments && (
-                <button className="text-button danger-text" type="button" onClick={() => onCancel(plan)}>
-                  Cancelar plan
-                </button>
-              )}
-            </div>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
 
-function MemberPanel({
-  memberId,
-  data,
-  summary,
-  incomeEntries,
-  paymentEntries,
-  currencyCode,
-  onAddIncome,
-  onEditIncome,
-  onDeleteIncome,
-  onEditPayment,
-  onMarkPaid,
-  onCancelPlan,
-  onSaveBalance,
-}) {
-  const memberName = memberId === "lisandro" ? "Lisandro" : "Catriel";
-  const memberSummary = summary.members[memberId];
+              {gastosCompartidosFiltrados.map(g => (
+                <div key={g.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #fffbeb', fontSize: '14px' }}>
+                  <span>{g.descripcion}</span>
+                  <div>
+                    <strong style={{ color: '#b45309', marginRight: '8px' }}>{formatoMoneda(g.monto)}</strong>
+                    <button onClick={() => setItemEditando({ tipo: 'gastosCompartidos', item: g })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
+                    <button onClick={() => eliminarItem('gastosCompartidos', g.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+                  </div>
+                </div>
+              ))}
 
-  return (
-    <section className={`household-panel member-panel ${memberId}-panel`} aria-labelledby={`${memberId}-title`}>
-      <header className="household-panel-header member-panel-header">
-        <p className="eyebrow">FINANZAS PERSONALES</p>
-        <h2 id={`${memberId}-title`}>{memberName}</h2>
-        <div className="available-readout">
-          <span>Disponible del mes</span>
-          <strong>{formatMinorAmount(memberSummary.availableMinor, currencyCode)}</strong>
+              <div style={{ backgroundColor: '#fffbeb', borderRadius: '8px', padding: '12px', marginTop: '12px', border: '1px solid #fde68a' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                  <span>Total Compartidos:</span>
+                  <strong>{formatoMoneda(totalCompartidoGeneral)}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginTop: '6px', color: '#b45309', fontWeight: 'bold' }}>
+                  <span>Corresponde a CADA UNO (50%):</span>
+                  <span>{formatoMoneda(cuotaCompartidaIndividual)}</span>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={agregarGastoCompartido} style={{ display: 'flex', gap: '8px', backgroundColor: '#ffffff', padding: '10px', borderRadius: '10px' }}>
+              <input type="text" placeholder="Ej: Alquiler" value={nuevoGastoCompartido.descripcion} onChange={e => setNuevoGastoCompartido({ ...nuevoGastoCompartido, descripcion: e.target.value })} style={{ flex: 1, padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+              <input type="number" placeholder="$ Total" value={nuevoGastoCompartido.monto} onChange={e => setNuevoGastoCompartido({ ...nuevoGastoCompartido, monto: e.target.value })} style={{ width: '90px', padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+              <button type="submit" style={{ backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 12px', fontWeight: 'bold', cursor: 'pointer' }}>+</button>
+            </form>
+          </div>
+
+          {/* GASTOS TARJETAS COMPARTIDOS */}
+          <div style={{ backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '16px' }}>
+            <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '16px', borderBottom: '2px solid #f1f5f9', paddingBottom: '8px' }}>
+              💳 Gastos Tarjetas Compartidos
+            </h3>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '13px', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#f0f9ff', padding: '8px 12px', borderRadius: '8px' }}>
+                <span style={{ color: '#0369a1', fontWeight: '500' }}>En tarjetas de Lisandro:</span>
+                <strong style={{ color: '#0369a1' }}>{formatoMoneda(consumosTarjetasCompartidosLisandro)}</strong>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#f0fdf4', padding: '8px 12px', borderRadius: '8px' }}>
+                <span style={{ color: '#15803d', fontWeight: '500' }}>En tarjetas de Catriel:</span>
+                <strong style={{ color: '#15803d' }}>{formatoMoneda(consumosTarjetasCompartidosCatriel)}</strong>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#fffbeb', border: '1px solid #fde68a', padding: '8px 12px', borderRadius: '8px', marginTop: '4px' }}>
+                <span style={{ color: '#b45309', fontWeight: 'bold' }}>Corresponde pagar a CADA UNO (50%):</span>
+                <strong style={{ color: '#b45309' }}>{formatoMoneda(cuotaPagaCadaUnoTarjetas)}</strong>
+              </div>
+            </div>
+
+            <div style={{
+              backgroundColor: diferenciaTarjetas === 0 ? '#f8fafc' : (diferenciaTarjetas > 0 ? '#f0fdf4' : '#f0f9ff'),
+              border: `1.5px solid ${diferenciaTarjetas === 0 ? '#cbd5e1' : (diferenciaTarjetas > 0 ? '#86efac' : '#38bdf8')}`,
+              borderRadius: '10px',
+              padding: '12px',
+              textAlign: 'center'
+            }}>
+              <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#64748b', display: 'block' }}>
+                ⚖️ LIQUIDACIÓN DE TARJETAS COMPARTIDAS
+              </span>
+              {diferenciaTarjetas === 0 ? (
+                <strong style={{ fontSize: '13px', color: '#475569', display: 'block', marginTop: '4px' }}>
+                  ¡Las tarjetas compartidas están 100% al día!
+                </strong>
+              ) : diferenciaTarjetas > 0 ? (
+                <div style={{ marginTop: '4px' }}>
+                  <span style={{ fontSize: '13px', color: '#166534', fontWeight: 'bold' }}>
+                    Lisandro le debe a Catriel:
+                  </span>
+                  <div style={{ fontSize: '18px', fontWeight: '800', color: '#15803d' }}>
+                    {formatoMoneda(montoAjusteTarjetas)}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: '4px' }}>
+                  <span style={{ fontSize: '13px', color: '#0369a1', fontWeight: 'bold' }}>
+                    Catriel le debe a Lisandro:
+                  </span>
+                  <div style={{ fontSize: '18px', fontWeight: '800', color: '#0284c7' }}>
+                    {formatoMoneda(montoAjusteTarjetas)}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* RECUADRO CARGO JUSTO */}
+          <div style={{ backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '16px' }}>
+            <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '15px', borderBottom: '2px solid #f1f5f9', paddingBottom: '8px' }}>
+              📊 Cargo Justo de Tarjetas (Solo Gastos Propios)
+            </h3>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              
+              <div style={{ backgroundColor: '#f0f9ff', padding: '10px', borderRadius: '8px', border: '1px solid #bae6fd', fontSize: '12px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#0369a1' }}>LISANDRO (PROPIO)</span>
+                <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0284c7', margin: '4px 0 8px 0' }}>
+                  {formatoMoneda(pagoExclusivoTarjetasLisandro)}
+                </div>
+                {desgloseTarjetasLisandro.length === 0 ? (
+                  <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>Sin consumos propios</span>
+                ) : (
+                  desgloseTarjetasLisandro.map((item, idx) => (
+                    <div key={idx} style={{ display: 'flex', flexDirection: 'column', borderTop: '1px solid #e0f2fe', padding: '4px 0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#334155' }}>
+                        <span>{item.nombre}:</span>
+                        <strong>{formatoMoneda(item.monto)}</strong>
+                      </div>
+                      {item.esTarjetaAjena && (
+                        <span style={{ fontSize: '10px', color: '#c2410c', fontWeight: 'bold' }}>
+                          ⚠️ (En tarjeta de {item.titular})
+                        </span>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div style={{ backgroundColor: '#f0fdf4', padding: '10px', borderRadius: '8px', border: '1px solid #86efac', fontSize: '12px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#166534' }}>CATRIEL (PROPIO)</span>
+                <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#15803d', margin: '4px 0 8px 0' }}>
+                  {formatoMoneda(pagoExclusivoTarjetasCatriel)}
+                </div>
+                {desgloseTarjetasCatriel.length === 0 ? (
+                  <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>Sin consumos propios</span>
+                ) : (
+                  desgloseTarjetasCatriel.map((item, idx) => (
+                    <div key={idx} style={{ display: 'flex', flexDirection: 'column', borderTop: '1px solid #dcfce7', padding: '4px 0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#334155' }}>
+                        <span>{item.nombre}:</span>
+                        <strong>{formatoMoneda(item.monto)}</strong>
+                      </div>
+                      {item.esTarjetaAjena && (
+                        <span style={{ fontSize: '10px', color: '#c2410c', fontWeight: 'bold' }}>
+                          ⚠️ (En tarjeta de {item.titular})
+                        </span>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+            </div>
+          </div>
+
+          {/* COMBUSTIBLE */}
+          <div style={{ backgroundColor: '#ffffff', border: '2px solid #fdba74', borderRadius: '16px', padding: '16px' }}>
+            <h3 style={{ margin: '0 0 12px 0', color: '#c2410c', fontSize: '16px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              ⛽ GASTOS DE COMBUSTIBLE
+            </h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <div style={{ backgroundColor: '#fff7ed', padding: '10px', borderRadius: '8px', border: '1px solid #ffedd5' }}>
+                <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#9a3412' }}>Combustible Lisandro:</span>
+                <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#ea580c' }}>
+                  {formatoMoneda(combustibleLisandro)}
+                </div>
+              </div>
+
+              <div style={{ backgroundColor: '#fff7ed', padding: '10px', borderRadius: '8px', border: '1px solid #ffedd5' }}>
+                <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#9a3412' }}>Combustible Catriel:</span>
+                <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#ea580c' }}>
+                  {formatoMoneda(combustibleCatriel)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* PRÉSTAMOS COMPARTIDOS */}
+          {prestamosCompartidos.length > 0 && (
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '2px solid #a855f7' }}>
+              <h3 style={{ margin: '0 0 12px 0', color: '#6b21a8', fontSize: '15px', textAlign: 'center' }}>🏦 Préstamos Compartidos (50/50)</h3>
+              {prestamosCompartidos.map(p => (
+                <div key={p.id} style={{ border: '1px solid #e9d5ff', backgroundColor: '#faf5ff', padding: '10px', borderRadius: '8px', fontSize: '12px', marginBottom: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ color: '#6b21a8' }}>{p.entidad}</strong>
+                    <div>
+                      <strong style={{ marginRight: '6px' }}>{formatoMoneda(p.montoCuota)}</strong>
+                      <button onClick={() => setItemEditando({ tipo: 'prestamos', item: p })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('prestamos', p.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>🗑️</button>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b', fontSize: '11px', marginTop: '4px' }}>
+                    <span>Cuota {p.cuotaRender} de {p.cuotasTotales}</span>
+                    <span>Cada uno: <strong>{formatoMoneda(p.montoCuota / 2)}</strong></span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* BALANCE FINAL */}
+          <div style={{ backgroundColor: '#ffffff', border: '2px solid #0f172a', borderRadius: '16px', padding: '16px' }}>
+            <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '16px', textAlign: 'center' }}>
+              💰 BALANCE NETO DEL MES
+            </h3>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              <div style={{ backgroundColor: '#f0f9ff', padding: '12px', borderRadius: '10px', border: '1px solid #bae6fd', fontSize: '12px' }}>
+                <strong style={{ color: '#0369a1', display: 'block', marginBottom: '6px' }}>LISANDRO</strong>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Ingresos:</span><strong>{formatoMoneda(totalIngresosLisandro)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#dc2626' }}><span>Gastos:</span><strong>{formatoMoneda(gastosTotalesLisandro)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2563eb' }}><span>Ahorro:</span><strong>{formatoMoneda(ahorroLisandro)}</strong></div>
+                <div style={{ borderTop: '1px solid #bae6fd', marginTop: '6px', paddingTop: '6px', display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                  <span>DISPONIBLE:</span>
+                  <strong style={{ color: disponibleLisandro >= 0 ? '#16a34a' : '#dc2626' }}>{formatoMoneda(disponibleLisandro)}</strong>
+                </div>
+              </div>
+
+              <div style={{ backgroundColor: '#f0fdf4', padding: '12px', borderRadius: '10px', border: '1px solid #86efac', fontSize: '12px' }}>
+                <strong style={{ color: '#15803d', display: 'block', marginBottom: '6px' }}>CATRIEL</strong>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Ingresos:</span><strong>{formatoMoneda(totalIngresosCatriel)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#dc2626' }}><span>Gastos:</span><strong>{formatoMoneda(gastosTotalesCatriel)}</strong></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2563eb' }}><span>Ahorro:</span><strong>{formatoMoneda(ahorroCatriel)}</strong></div>
+                <div style={{ borderTop: '1px solid #86efac', marginTop: '6px', paddingTop: '6px', display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                  <span>DISPONIBLE:</span>
+                  <strong style={{ color: disponibleCatriel >= 0 ? '#16a34a' : '#dc2626' }}>{formatoMoneda(disponibleCatriel)}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
-      </header>
-      <div className="member-stats">
-        <div>
-          <span>Ingresos</span>
-          <strong>{formatMinorAmount(memberSummary.incomeMinor, currencyCode)}</strong>
+
+        {/* ================= COLUMNA 3: CATRIEL ================= */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ backgroundColor: '#f0fdf4', border: '2px solid #4ade80', borderRadius: '16px', padding: '16px' }}>
+            <h2 style={{ margin: '0 0 12px 0', color: '#15803d', fontSize: '20px' }}>👤 CATRIEL</h2>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
+              <div style={{ backgroundColor: '#dcfce7', borderRadius: '12px', padding: '12px', border: '1px solid #86efac' }}>
+                <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#166534', display: 'block' }}>💵 INGRESOS</span>
+                {ingresosCatriel.map(ing => (
+                  <div key={ing.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', fontSize: '12px' }}>
+                    <span>{ing.descripcion}</span>
+                    <div>
+                      <strong style={{ color: '#15803d', marginRight: '4px' }}>{formatoMoneda(ing.monto)}</strong>
+                      <button onClick={() => setItemEditando({ tipo: 'ingresos', item: ing })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '10px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('ingresos', ing.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '10px' }}>🗑️</button>
+                    </div>
+                  </div>
+                ))}
+                <div style={{ borderTop: '1px solid #bbf7d0', marginTop: '6px', paddingTop: '4px', textAlign: 'right', fontSize: '11px' }}>
+                  <strong>Tot: {formatoMoneda(totalIngresosCatriel)}</strong>
+                </div>
+              </div>
+
+              <div style={{ backgroundColor: '#f0fdf4', borderRadius: '12px', padding: '12px', border: '2px solid #4ade80' }}>
+                <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#15803d', display: 'block' }}>🐷 AHORRO</span>
+                <div style={{ fontSize: '15px', fontWeight: 'bold', color: '#15803d', marginTop: '4px' }}>
+                  {formatoMoneda(ahorroCatriel)}
+                </div>
+                <input
+                  type="number"
+                  placeholder="Editar $"
+                  onBlur={e => e.target.value !== '' && guardarAhorro('Catriel', e.target.value)}
+                  style={{ width: '80%', padding: '2px 4px', marginTop: '4px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '11px' }}
+                />
+              </div>
+            </div>
+
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', padding: '12px', border: '1px solid #bbf7d0' }}>
+              <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#64748b', display: 'block', marginBottom: '8px' }}>GASTOS PROPIOS CATRIEL</span>
+              {gastosCatrielFiltrados.map(g => (
+                <div key={g.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', fontSize: '13px' }}>
+                  <span>{g.descripcion}</span>
+                  <div>
+                    <strong style={{ marginRight: '8px' }}>{formatoMoneda(g.monto)}</strong>
+                    <button onClick={() => setItemEditando({ tipo: 'gastosCatriel', item: g })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️️</button>
+                    <button onClick={() => eliminarItem('gastosCatriel', g.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+                  </div>
+                </div>
+              ))}
+              <div style={{ marginTop: '8px', textAlign: 'right', fontSize: '12px' }}>
+                <span>Subtotal Propio: <strong>{formatoMoneda(totalIndCatriel)}</strong></span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '1px solid #86efac' }}>
+            <h3 style={{ margin: '0 0 12px 0', color: '#15803d', fontSize: '16px' }}>💳 Tarjetas de Catriel</h3>
+            {tarjetasCatriel.map(t => {
+              const consumos = obtenerConsumosActivosPorMes(t.id);
+              const totalResumen = consumos.reduce((a, b) => a + b.montoCuota, 0);
+
+              return (
+                <div key={t.id} style={{ border: '1px solid #86efac', borderRadius: '12px', padding: '12px', marginBottom: '12px', backgroundColor: '#f0fdf4' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <strong style={{ color: '#15803d' }}>💳 {t.nombre}</strong>
+                    <div>
+                      <button onClick={() => setItemEditando({ tipo: 'tarjetas', item: t })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('tarjetas', t.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '8px' }}>
+                    Total Resumen Mes: <strong style={{ color: '#15803d' }}>{formatoMoneda(totalResumen)}</strong>
+                  </div>
+
+                  {consumos.map(c => (
+                    <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', padding: '6px 8px', borderRadius: '6px', fontSize: '12px', marginBottom: '4px' }}>
+                      <div>
+                        <span>{c.descripcion}</span>
+                        <span style={{ color: '#16a34a', fontSize: '10px', marginLeft: '6px', fontWeight: 'bold' }}>
+                          (Cuota {c.cuotaRender}/{c.cuotasTotales})
+                        </span>
+                        <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>
+                          Paga: <strong>{c.quienPaga === 'Otro' ? c.pagadorDetalle : c.quienPaga}</strong>
+                        </span>
+                      </div>
+                      <div>
+                        <strong style={{ marginRight: '6px' }}>{formatoMoneda(c.montoCuota)}</strong>
+                        <button onClick={() => setItemEditando({ tipo: 'consumosTarjetas', item: c })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>✏️</button>
+                        <button onClick={() => eliminarItem('consumosTarjetas', c.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>🗑️</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          {prestamosCatriel.length > 0 && (
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '2px solid #a855f7' }}>
+              <h3 style={{ margin: '0 0 12px 0', color: '#6b21a8', fontSize: '15px' }}>🏦 Préstamos de Catriel</h3>
+              {prestamosCatriel.map(p => (
+                <div key={p.id} style={{ border: '1px solid #e9d5ff', backgroundColor: '#faf5ff', padding: '10px', borderRadius: '8px', fontSize: '12px', marginBottom: '6px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ color: '#6b21a8' }}>{p.entidad}</strong>
+                    <div>
+                      <strong style={{ marginRight: '6px' }}>{formatoMoneda(p.montoCuota)}</strong>
+                      <button onClick={() => setItemEditando({ tipo: 'prestamos', item: p })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>✏️</button>
+                      <button onClick={() => eliminarItem('prestamos', p.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px' }}>🗑️</button>
+                    </div>
+                  </div>
+                  <span style={{ color: '#64748b', fontSize: '10px' }}>Cuota {p.cuotaRender} de {p.cuotasTotales}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {Object.keys(deudoresCatriel).length > 0 && (
+            <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '2px solid #4ade80' }}>
+              <h3 style={{ margin: '0 0 8px 0', color: '#15803d', fontSize: '15px' }}>📌 Le deben a Catriel (Tarjetas)</h3>
+              {Object.entries(deudoresCatriel).map(([nombre, monto]) => (
+                <div key={nombre} style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#f0fdf4', padding: '8px 12px', borderRadius: '8px', fontSize: '13px', marginTop: '6px' }}>
+                  <span style={{ fontWeight: 'bold', color: '#15803d' }}>{nombre}</span>
+                  <strong style={{ color: '#16a34a' }}>{formatoMoneda(monto)}</strong>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        <div>
-          <span>Pagos imputados</span>
-          <strong>{formatMinorAmount(memberSummary.paymentsMinor, currencyCode)}</strong>
-        </div>
+
       </div>
-      <section className="panel-section" aria-labelledby={`${memberId}-income-title`}>
-        <div className="panel-section-heading">
-          <h3 id={`${memberId}-income-title`}>Ingresos</h3>
-          <button className="text-button" type="button" onClick={() => onAddIncome(memberId)}>
-            + Añadir
-          </button>
+
+
+      {/* ================= SECCIÓN INFERIOR: FORMULARIOS ================= */}
+      <div style={{ maxWidth: '1400px', margin: '32px auto 0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        
+        <section style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '16px', border: '2px solid #a855f7' }}>
+          <h2 style={{ margin: '0 0 12px 0', color: '#6b21a8', fontSize: '18px' }}>🏦 Cargar Nuevo Préstamo / Crédito</h2>
+
+          <form onSubmit={agregarPrestamo} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', backgroundColor: '#f3e8ff', padding: '12px', borderRadius: '10px' }}>
+            <input type="text" placeholder="Entidad (ej: Banco Hipotecario)" value={nuevoPrestamo.entidad} onChange={e => setNuevoPrestamo({ ...nuevoPrestamo, entidad: e.target.value })} style={{ flex: 1, padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <input type="number" placeholder="$ Cuota" value={nuevoPrestamo.montoCuota} onChange={e => setNuevoPrestamo({ ...nuevoPrestamo, montoCuota: e.target.value })} style={{ width: '100px', padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <input type="number" placeholder="Cuota Act." value={nuevoPrestamo.cuotaActual} onChange={e => setNuevoPrestamo({ ...nuevoPrestamo, cuotaActual: e.target.value })} style={{ width: '80px', padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <input type="number" placeholder="Tot Cuotas" value={nuevoPrestamo.cuotasTotales} onChange={e => setNuevoPrestamo({ ...nuevoPrestamo, cuotasTotales: e.target.value })} style={{ width: '80px', padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <select value={nuevoPrestamo.quienPaga} onChange={e => setNuevoPrestamo({ ...nuevoPrestamo, quienPaga: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+              <option value="Compartido">Compartido (Centro)</option>
+              <option value="Catriel">Paga Catriel (Derecha)</option>
+              <option value="Lisandro">Paga Lisandro (Izquierda)</option>
+            </select>
+            <button type="submit" style={{ backgroundColor: '#9333ea', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', fontWeight: 'bold', cursor: 'pointer' }}>+ Cargar Préstamo</button>
+          </form>
+        </section>
+
+        <section style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '16px', border: '1px solid #cbd5e1' }}>
+          <h2 style={{ margin: '0 0 16px 0', color: '#0f172a', fontSize: '18px' }}>🛍️ Cargar Nuevo Consumo con Tarjeta</h2>
+
+          <form onSubmit={agregarConsumoTarjeta} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <label style={{ fontSize: '13px', fontWeight: 'bold' }}>1. ¿Quién realiza el gasto?:</label>
+                <select
+                  value={usuarioConsumo}
+                  onChange={e => {
+                    setUsuarioConsumo(e.target.value);
+                    setNuevoConsumo({ ...nuevoConsumo, tarjetaId: '' });
+                  }}
+                  style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontWeight: 'bold' }}
+                >
+                  <option value="Catriel">Catriel</option>
+                  <option value="Lisandro">Lisandro</option>
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <label style={{ fontSize: '13px', fontWeight: 'bold' }}>2. Elegir Tarjeta:</label>
+                <select
+                  value={nuevoConsumo.tarjetaId}
+                  onChange={e => setNuevoConsumo({ ...nuevoConsumo, tarjetaId: e.target.value })}
+                  style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                >
+                  <option value="">-- Seleccionar --</option>
+                  {tarjetasDelUsuarioActual.map(t => (
+                    <option key={t.id} value={t.id}>{t.nombre}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                placeholder="Descripción del gasto (ej: Repuesto / Combustible)"
+                value={nuevoConsumo.descripcion}
+                onChange={e => setNuevoConsumo({ ...nuevoConsumo, descripcion: e.target.value })}
+                style={{ flex: 2, minWidth: '200px', padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+              />
+
+              <input
+                type="number"
+                placeholder="$ Monto por cuota"
+                value={nuevoConsumo.montoCuota}
+                onChange={e => setNuevoConsumo({ ...nuevoConsumo, montoCuota: e.target.value })}
+                style={{ width: '150px', padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+              />
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span style={{ fontSize: '12px' }}>Cuota:</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={nuevoConsumo.cuotaActual}
+                  onChange={e => setNuevoConsumo({ ...nuevoConsumo, cuotaActual: e.target.value })}
+                  style={{ width: '50px', padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+                <span style={{ fontSize: '12px' }}>de</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={nuevoConsumo.cuotasTotales}
+                  onChange={e => setNuevoConsumo({ ...nuevoConsumo, cuotasTotales: e.target.value })}
+                  style={{ width: '50px', padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <label style={{ fontSize: '13px', fontWeight: 'bold' }}>¿Quién paga?:</label>
+                <select
+                  value={nuevoConsumo.quienPaga}
+                  onChange={e => setNuevoConsumo({ ...nuevoConsumo, quienPaga: e.target.value })}
+                  style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                >
+                  <option value="Catriel">Catriel</option>
+                  <option value="Lisandro">Lisandro</option>
+                  <option value="Compartido">Compartido</option>
+                  <option value="Otro">Otro / Tercero</option>
+                </select>
+
+                {nuevoConsumo.quienPaga === 'Otro' && (
+                  <input
+                    type="text"
+                    placeholder="Especifique quién (ej: Papá)"
+                    value={nuevoConsumo.pagadorOtroTexto}
+                    onChange={e => setNuevoConsumo({ ...nuevoConsumo, pagadorOtroTexto: e.target.value })}
+                    style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1', width: '180px' }}
+                  />
+                )}
+              </div>
+
+              <button type="submit" style={{ backgroundColor: '#2563eb', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>
+                + Cargar Consumo
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px' }}>
+          <form onSubmit={agregarTarjeta} style={{ backgroundColor: '#ffffff', padding: '16px', borderRadius: '12px', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <h4 style={{ margin: 0, color: '#0f172a' }}>💳 Crear Nueva Tarjeta</h4>
+            <select value={nuevaTarjeta.titular} onChange={e => setNuevaTarjeta({ ...nuevaTarjeta, titular: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+              <option value="Catriel">Para Catriel</option>
+              <option value="Lisandro">Para Lisandro</option>
+            </select>
+            <input type="text" placeholder="Nombre (ej. NACION - VISA)" value={nuevaTarjeta.nombre} onChange={e => setNuevaTarjeta({ ...nuevaTarjeta, nombre: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <button type="submit" style={{ backgroundColor: '#475569', color: '#fff', border: 'none', padding: '8px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>+ Guardar Tarjeta</button>
+          </form>
+
+          <form onSubmit={agregarIngreso} style={{ backgroundColor: '#ffffff', padding: '16px', borderRadius: '12px', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <h4 style={{ margin: 0, color: '#0f172a' }}>➕ Cargar Nuevo Ingreso</h4>
+            <select value={nuevoIngreso.usuario} onChange={e => setNuevoIngreso({ ...nuevoIngreso, usuario: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+              <option value="Catriel">Para Catriel</option>
+              <option value="Lisandro">Para Lisandro</option>
+            </select>
+            <input type="text" placeholder="Descripción" value={nuevoIngreso.descripcion} onChange={e => setNuevoIngreso({ ...nuevoIngreso, descripcion: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <input type="number" placeholder="Monto $" value={nuevoIngreso.monto} onChange={e => setNuevoIngreso({ ...nuevoIngreso, monto: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <button type="submit" style={{ backgroundColor: '#16a34a', color: '#fff', border: 'none', padding: '8px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Agregar Ingreso</button>
+          </form>
+
+          <form onSubmit={agregarGastoInd} style={{ backgroundColor: '#ffffff', padding: '16px', borderRadius: '12px', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <h4 style={{ margin: 0, color: '#0f172a' }}>➕ Cargar Gasto Propio</h4>
+            <select value={nuevoGastoInd.usuario} onChange={e => setNuevoGastoInd({ ...nuevoGastoInd, usuario: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+              <option value="Catriel">De Catriel</option>
+              <option value="Lisandro">De Lisandro</option>
+            </select>
+            <input type="text" placeholder="Descripción" value={nuevoGastoInd.descripcion} onChange={e => setNuevoGastoInd({ ...nuevoGastoInd, descripcion: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <input type="number" placeholder="Monto $" value={nuevoGastoInd.monto} onChange={e => setNuevoGastoInd({ ...nuevoGastoInd, monto: e.target.value })} style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1' }} />
+            <button type="submit" style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '8px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Agregar Gasto Propio</button>
+          </form>
+
+        </section>
+
+      </div>
+
+      {/* MODAL EDICIÓN */}
+      {itemEditando && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <form onSubmit={guardarEdicion} style={{ backgroundColor: '#ffffff', padding: '24px', borderRadius: '16px', minWidth: '320px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h3 style={{ margin: 0, color: '#0f172a' }}>✏️ Editar Registro</h3>
+
+            {itemEditando.tipo === 'prestamos' ? (
+              <>
+                <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Entidad / Préstamo:</label>
+                <input
+                  type="text"
+                  value={itemEditando.item.entidad}
+                  onChange={e => setItemEditando({ ...itemEditando, item: { ...itemEditando.item, entidad: e.target.value } })}
+                  style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+                <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Monto Cuota $:</label>
+                <input
+                  type="number"
+                  value={itemEditando.item.montoCuota}
+                  onChange={e => setItemEditando({ ...itemEditando, item: { ...itemEditando.item, montoCuota: parseFloat(e.target.value) || 0 } })}
+                  style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+              </>
+            ) : itemEditando.tipo === 'tarjetas' ? (
+              <>
+                <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Nombre Tarjeta:</label>
+                <input
+                  type="text"
+                  value={itemEditando.item.nombre}
+                  onChange={e => setItemEditando({ ...itemEditando, item: { ...itemEditando.item, nombre: e.target.value } })}
+                  style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+              </>
+            ) : (
+              <>
+                <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Descripción:</label>
+                <input
+                  type="text"
+                  value={itemEditando.item.descripcion}
+                  onChange={e => setItemEditando({ ...itemEditando, item: { ...itemEditando.item, descripcion: e.target.value } })}
+                  style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+                <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Monto $:</label>
+                <input
+                  type="number"
+                  value={itemEditando.item.monto || itemEditando.item.montoCuota}
+                  onChange={e => setItemEditando({ ...itemEditando, item: { ...itemEditando.item, [itemEditando.item.monto ? 'monto' : 'montoCuota']: parseFloat(e.target.value) || 0 } })}
+                  style={{ padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                />
+              </>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '12px' }}>
+              <button type="button" onClick={() => setItemEditando(null)} style={{ padding: '8px 16px', borderRadius: '6px', border: '1px solid #cbd5e1', background: '#f1f5f9', cursor: 'pointer' }}>Cancelar</button>
+              <button type="submit" style={{ padding: '8px 16px', borderRadius: '6px', border: 'none', background: '#16a34a', color: '#fff', fontWeight: 'bold', cursor: 'pointer' }}>Guardar Cambios</button>
+            </div>
+          </form>
         </div>
-        <IncomeEntries
-          entries={incomeEntries}
-          categories={data.categories}
-          currencyCode={currencyCode}
-          onEdit={onEditIncome}
-          onDelete={onDeleteIncome}
-        />
-      </section>
-      <section className="panel-section" aria-labelledby={`${memberId}-payments-title`}>
-        <div className="panel-section-heading">
-          <h3 id={`${memberId}-payments-title`}>Pagos personales</h3>
-        </div>
-        <PaymentEntries
-          entries={paymentEntries}
-          categories={data.categories}
-          currencyCode={currencyCode}
-          onEdit={onEditPayment}
-          onMarkPaid={onMarkPaid}
-          onCancel={onCancelPlan}
-        />
-      </section>
-      <section className="panel-section member-balance-section" aria-label={`Ahorro y deuda de ${memberName}`}>
-        <div className="panel-section-heading">
-          <h3>Ahorro y deuda</h3>
-        </div>
-        <div className="member-balance-grid">
-          <BalanceEditor
-            label="Ahorro"
-            idPrefix={`${memberId}-savings`}
-            amountMinor={data.balances[memberId].savingsMinor}
-            currencyCode={currencyCode}
-            onSave={(amountMinor) => onSaveBalance(memberId, "savingsMinor", amountMinor)}
-          />
-          <BalanceEditor
-            label="Deuda"
-            idPrefix={`${memberId}-debt`}
-            amountMinor={data.balances[memberId].debtMinor}
-            currencyCode={currencyCode}
-            onSave={(amountMinor) => onSaveBalance(memberId, "debtMinor", amountMinor)}
-          />
-        </div>
-      </section>
-    </section>
-  );
-}
-
-function SharedPanel({ entries, categories, currencyCode, sharedCommitmentsMinor, onEdit, onMarkPaid, onCancel }) {
-  return (
-    <section className="household-panel shared-panel" aria-labelledby="shared-title">
-      <header className="household-panel-header shared-panel-header">
-        <p className="eyebrow">RESPONSABILIDAD CONJUNTA</p>
-        <h2 id="shared-title">Compartido</h2>
-        <div className="available-readout shared-total">
-          <span>Compromisos del mes</span>
-          <strong>{formatMinorAmount(sharedCommitmentsMinor, currencyCode)}</strong>
-        </div>
-        <p className="shared-rule">Se imputa 50% a cada uno</p>
-      </header>
-      <section className="panel-section shared-payment-section" aria-labelledby="shared-payments-title">
-        <div className="panel-section-heading">
-          <h3>Pagos compartidos</h3>
-        </div>
-        <PaymentEntries
-          entries={entries}
-          categories={categories}
-          currencyCode={currencyCode}
-          onEdit={onEdit}
-          onMarkPaid={onMarkPaid}
-          onCancel={onCancel}
-        />
-      </section>
-    </section>
-  );
-}
-
-function HouseholdDashboard({ data, setData, monthKey, setMonthKey, persistenceStatus }) {
-  const [incomeEditor, setIncomeEditor] = useState(null);
-  const [paymentEditor, setPaymentEditor] = useState(null);
-  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
-  const [backupDialogOpen, setBackupDialogOpen] = useState(false);
-  const [backupMessage, setBackupMessage] = useState("");
-  const currencyCode = data.settings.currencyCode;
-  const summary = getHouseholdMonthSummaryV2(data, monthKey);
-
-  function getMonthPayments(responsibility) {
-    return data.paymentPlans
-      .filter((plan) => plan.responsibility === responsibility)
-      .flatMap((plan) =>
-        plan.installments
-          .filter((installment) => installment.dueDate.slice(0, 7) === monthKey)
-          .map((installment) => ({ plan, installment })),
-      )
-      .sort((first, second) => first.installment.dueDate.localeCompare(second.installment.dueDate));
-  }
-
-  const lisandroIncome = data.incomeEntries
-    .filter((entry) => entry.memberId === "lisandro" && entry.date.slice(0, 7) === monthKey)
-    .sort((first, second) => second.date.localeCompare(first.date));
-  const catrielIncome = data.incomeEntries
-    .filter((entry) => entry.memberId === "catriel" && entry.date.slice(0, 7) === monthKey)
-    .sort((first, second) => second.date.localeCompare(first.date));
-  const lisandroPayments = getMonthPayments("lisandro");
-  const sharedPayments = getMonthPayments("shared");
-  const catrielPayments = getMonthPayments("catriel");
-
-  function saveIncomeEntry(incomeEntry) {
-    setData((currentData) => {
-      const exists = currentData.incomeEntries.some((entry) => entry.id === incomeEntry.id);
-      return {
-        ...currentData,
-        incomeEntries: exists
-          ? currentData.incomeEntries.map((entry) => (entry.id === incomeEntry.id ? incomeEntry : entry))
-          : [...currentData.incomeEntries, incomeEntry],
-      };
-    });
-    setIncomeEditor(null);
-  }
-
-  function deleteIncomeEntry(incomeEntry) {
-    if (!window.confirm(`¿Eliminar el ingreso «${incomeEntry.description}»?`)) return;
-    setData((currentData) => ({
-      ...currentData,
-      incomeEntries: currentData.incomeEntries.filter((entry) => entry.id !== incomeEntry.id),
-    }));
-  }
-
-  function savePaymentPlan(paymentPlan) {
-    setData((currentData) => {
-      const exists = currentData.paymentPlans.some((plan) => plan.id === paymentPlan.id);
-      return {
-        ...currentData,
-        paymentPlans: exists
-          ? currentData.paymentPlans.map((plan) => (plan.id === paymentPlan.id ? paymentPlan : plan))
-          : [...currentData.paymentPlans, paymentPlan],
-      };
-    });
-    setPaymentEditor(null);
-  }
-
-  function markInstallmentPaid(paymentPlan, installment) {
-    setData((currentData) => ({
-      ...currentData,
-      paymentPlans: currentData.paymentPlans.map((plan) =>
-        plan.id !== paymentPlan.id
-          ? plan
-          : {
-              ...plan,
-              installments: plan.installments.map((item) =>
-                item.id === installment.id ? { ...item, status: "paid" } : item,
-              ),
-            },
-      ),
-    }));
-  }
-
-  function cancelPlan(paymentPlan) {
-    const result = cancelPaymentPlan(paymentPlan);
-    const message =
-      result.action === "delete"
-        ? `¿Eliminar el plan «${paymentPlan.description}»?`
-        : `El plan «${paymentPlan.description}» tiene pagos realizados. ¿Cancelar sus cuotas pendientes?`;
-    if (!window.confirm(message)) return;
-
-    setData((currentData) => ({
-      ...currentData,
-      paymentPlans:
-        result.action === "delete"
-          ? currentData.paymentPlans.filter((plan) => plan.id !== paymentPlan.id)
-          : currentData.paymentPlans.map((plan) => (plan.id === paymentPlan.id ? result.plan : plan)),
-    }));
-  }
-
-  function saveCategory(category) {
-    setData((currentData) => {
-      const exists = currentData.categories.some((item) => item.id === category.id);
-      return {
-        ...currentData,
-        categories: exists
-          ? currentData.categories.map((item) => (item.id === category.id ? category : item))
-          : [...currentData.categories, category],
-      };
-    });
-  }
-
-  function saveBalance(memberId, balanceKey, amountMinor) {
-    setData((currentData) => ({
-      ...currentData,
-      balances: {
-        ...currentData.balances,
-        [memberId]: { ...currentData.balances[memberId], [balanceKey]: amountMinor },
-      },
-    }));
-  }
-
-  function importBackup(importedData) {
-    setData(importedData);
-    setBackupDialogOpen(false);
-    setBackupMessage("Respaldo importado correctamente.");
-  }
-
-  function updateMonth(amount) {
-    setMonthKey((currentMonth) => shiftMonth(currentMonth, amount));
-  }
-
-  return (
-    <>
-      <main className="workspace household-workspace">
-        <StorageNotice status={persistenceStatus} />
-        {backupMessage && (
-          <div className="success-notice" role="status">
-            <span>{backupMessage}</span>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Cerrar aviso"
-              title="Cerrar aviso"
-              onClick={() => setBackupMessage("")}
-            >
-              ×
-            </button>
-          </div>
-        )}
-        <div className="page-heading household-heading">
-          <div>
-            <p className="eyebrow">FINANZAS DEL HOGAR</p>
-            <h1>Control mensual</h1>
-          </div>
-          <div className="page-actions household-actions">
-            <button className="secondary-button" type="button" onClick={() => setCategoryDialogOpen(true)}>
-              Categorías
-            </button>
-            <button className="secondary-button" type="button" onClick={() => setBackupDialogOpen(true)}>
-              Respaldo
-            </button>
-            <button className="secondary-button" type="button" onClick={() => setIncomeEditor({ income: null })}>
-              + Ingreso
-            </button>
-            <button className="primary-button" type="button" onClick={() => setPaymentEditor({ plan: null })}>
-              + Pago
-            </button>
-          </div>
-        </div>
-
-        <div className="month-switcher" aria-label="Periodo del resumen">
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="Mes anterior"
-            title="Mes anterior"
-            onClick={() => updateMonth(-1)}
-          >
-            ‹
-          </button>
-          <strong>{getMonthLabel(monthKey)}</strong>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="Mes siguiente"
-            title="Mes siguiente"
-            onClick={() => updateMonth(1)}
-          >
-            ›
-          </button>
-        </div>
-
-        <div className="household-grid">
-          <MemberPanel
-            memberId="lisandro"
-            data={data}
-            summary={summary}
-            incomeEntries={lisandroIncome}
-            paymentEntries={lisandroPayments}
-            currencyCode={currencyCode}
-            onAddIncome={(memberId) => setIncomeEditor({ income: null, memberId })}
-            onEditIncome={(income) => setIncomeEditor({ income })}
-            onDeleteIncome={deleteIncomeEntry}
-            onEditPayment={(plan) => setPaymentEditor({ plan })}
-            onMarkPaid={markInstallmentPaid}
-            onCancelPlan={cancelPlan}
-            onSaveBalance={saveBalance}
-          />
-          <SharedPanel
-            entries={sharedPayments}
-            categories={data.categories}
-            currencyCode={currencyCode}
-            sharedCommitmentsMinor={summary.sharedCommitmentsMinor}
-            onEdit={(plan) => setPaymentEditor({ plan })}
-            onMarkPaid={markInstallmentPaid}
-            onCancel={cancelPlan}
-          />
-          <MemberPanel
-            memberId="catriel"
-            data={data}
-            summary={summary}
-            incomeEntries={catrielIncome}
-            paymentEntries={catrielPayments}
-            currencyCode={currencyCode}
-            onAddIncome={(memberId) => setIncomeEditor({ income: null, memberId })}
-            onEditIncome={(income) => setIncomeEditor({ income })}
-            onDeleteIncome={deleteIncomeEntry}
-            onEditPayment={(plan) => setPaymentEditor({ plan })}
-            onMarkPaid={markInstallmentPaid}
-            onCancelPlan={cancelPlan}
-            onSaveBalance={saveBalance}
-          />
-        </div>
-      </main>
-
-      <footer className="app-footer">
-        <span>FINANZAS DEL HOGAR</span>
-        <span>{currencyCode} · DATOS LOCALES</span>
-      </footer>
-
-      {incomeEditor && (
-        <IncomeDialog
-          key={incomeEditor.income?.id ?? `new-${incomeEditor.memberId ?? "income"}`}
-          initialIncome={incomeEditor.income}
-          categories={data.categories}
-          currencyCode={currencyCode}
-          onClose={() => setIncomeEditor(null)}
-          onSave={saveIncomeEntry}
-        />
       )}
-      {paymentEditor && (
-        <PaymentPlanDialog
-          key={paymentEditor.plan?.id ?? "new-payment-plan"}
-          initialPlan={paymentEditor.plan}
-          categories={data.categories}
-          currencyCode={currencyCode}
-          onClose={() => setPaymentEditor(null)}
-          onSave={savePaymentPlan}
-        />
-      )}
-      {categoryDialogOpen && (
-        <CategoryDialog
-          categories={data.categories}
-          onClose={() => setCategoryDialogOpen(false)}
-          onSave={saveCategory}
-        />
-      )}
-      {backupDialogOpen && (
-        <BackupDialog
-          financeData={data}
-          onClose={() => setBackupDialogOpen(false)}
-          onImport={importBackup}
-          parser={parseHouseholdBackupV2}
-          serializer={serializeHouseholdBackupV2}
-        />
-      )}
-    </>
-  );
-}
 
-function App() {
-  const [loadedState] = useState(() => loadHouseholdDataV2());
-  const [householdData, setHouseholdData] = useState(loadedState.data);
-  const [persistenceStatus, setPersistenceStatus] = useState(loadedState.status);
-  const [currencySelection, setCurrencySelection] = useState("");
-  const [monthKey, setMonthKey] = useState(getCurrentMonthKey);
-
-  useEffect(() => {
-    if (persistenceStatus !== "available" || !householdData.settings.currencyCode) return;
-
-    const result = saveHouseholdDataV2(householdData);
-    if (result.status === "unavailable" || result.status === "invalid") {
-      setPersistenceStatus(result.status === "invalid" ? "invalid" : "unavailable");
-    }
-  }, [householdData, persistenceStatus]);
-
-  function handleCurrencySubmit(event) {
-    event.preventDefault();
-    if (!currencyOptions.some((option) => option.code === currencySelection)) return;
-
-    setHouseholdData((currentData) => ({
-      ...currentData,
-      settings: { ...currentData.settings, currencyCode: currencySelection },
-    }));
-  }
-
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <Brand />
-        <div className="local-indicator">
-          <span aria-hidden="true" />
-          {persistenceStatus === "available" ? "Datos locales" : "Solo esta sesión"}
-        </div>
-      </header>
-      {householdData.settings.currencyCode ? (
-        <HouseholdDashboard
-          data={householdData}
-          setData={setHouseholdData}
-          monthKey={monthKey}
-          setMonthKey={setMonthKey}
-          persistenceStatus={persistenceStatus}
-        />
-      ) : (
-        <CurrencySetup
-          selectedCurrency={currencySelection}
-          onCurrencyChange={setCurrencySelection}
-          onSubmit={handleCurrencySubmit}
-          persistenceStatus={persistenceStatus}
-        />
-      )}
     </div>
   );
 }
-
-export default App;

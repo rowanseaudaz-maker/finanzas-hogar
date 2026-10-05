@@ -13,6 +13,7 @@
 - Registrar entidad acreedora como texto libre, con Nación y Naranja como ejemplos.
 - Registrar descripción, importe de cada cuota, cuota actual, total de cuotas y próximo vencimiento.
 - Asignar cada préstamo a Lisandro, Catriel o ambos con reparto 50/50.
+- En un préstamo compartido, indicar `remainderMemberId` para asignar cualquier centavo indivisible.
 - Registrar quién paga cada cuota: Lisandro, Catriel o una persona externa con nombre.
 - Generar las cuotas mensuales desde la cuota actual hasta la última, ajustando los vencimientos al último día del mes cuando el día original no exista.
 - Marcar cuotas pendientes como pagadas; conservar las pagadas y avanzar al siguiente número de cuota hasta completar el préstamo.
@@ -40,6 +41,7 @@ const loan = {
   lender: "Nación",
   description: "Préstamo personal",
   responsibility: "lisandro",
+  remainderMemberId: null,
   payer: { kind: "member", memberId: "lisandro" },
   installments: [
     {
@@ -56,6 +58,8 @@ const loan = {
 
 `lender` es texto editable. `responsibility` admite `lisandro`, `catriel` o `shared`. `payer.kind` admite `member` o `external`; los pagadores externos incluyen `name`. `installments` cubre desde el número actual hasta el total, con cuotas `pending` o `paid`. El importe de cuota se ingresa manualmente y no se calcula interés.
 
+`remainderMemberId` es obligatorio para préstamos compartidos y admite `lisandro` o `catriel`; para préstamos personales es `null`. El centavo impar se asigna a esa persona.
+
 ## Plan de implementación
 
 1. Extender `src/lib/storage.js` y `src/lib/storage.test.js` para crear el esquema v3, copiar íntegramente v2 y conservar intacta la clave v2.
@@ -69,6 +73,7 @@ const loan = {
 - [ ] `npm run dev`, `npm test` y `npm run build` terminan correctamente.
 - [ ] Se puede crear un préstamo con entidad libre, importe de cuota, número actual, total y próximo vencimiento.
 - [ ] El préstamo puede ser de Lisandro, de Catriel o compartido al 50%; se puede asignar un miembro o un externo como pagador.
+- [ ] Un préstamo compartido con un importe impar asigna el centavo restante a `remainderMemberId`.
 - [ ] Se generan las cuotas mensuales desde la actual hasta la última y se ajustan los vencimientos al fin de mes cuando corresponde.
 - [ ] Marcar una cuota como pagada conserva su registro y avanza a la siguiente; al pagar la última el préstamo queda completo.
 - [ ] Las cuotas del préstamo se incluyen en el disponible mensual de SPEC 02 sin contar dos veces una cuota pagada.
@@ -83,6 +88,7 @@ const loan = {
 - **Sí:** separar préstamos en SPEC 03, dependiente del control de pagos de SPEC 02.
 - **Sí:** entidad acreedora libre y cuotas con importe ingresado; no se estiman intereses ni amortización.
 - **Sí:** usar el mismo modelo de responsabilidad, pagador y reparto de SPEC 02.
+- **Sí:** agregar `remainderMemberId` para resolver centavos indivisibles en préstamos compartidos.
 - **Sí:** mantener las cuotas pagadas en el historial y en el disponible proyectado de su mes.
 - **Sí:** versionar v3 por separado y preservar sin cambios el modelo v2.
 - **No:** sincronizar con prestamistas o calcular deuda pendiente a partir de capital e intereses.
