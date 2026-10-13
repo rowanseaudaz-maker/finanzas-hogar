@@ -1,42 +1,27 @@
 import React, { useState, useEffect } from 'react';
+import { supabase } from './supabaseClient';
 
 export default function App() {
   const [mesSeleccionado, setMesSeleccionado] = useState('2026-10');
+  const [cargando, setCargando] = useState(true);
 
-  // ALMACENAMIENTO PERMANENTE LOCAL
-  const STORAGE_KEY = 'finanzas_hogar_v2';
-
-  const [data, setData] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error('Error leyendo localStorage:', e);
-      }
-    }
-
-    return {
-      ingresos: [],
-      ahorros: [],
-      gastosLisandro: [],
-      gastosCatriel: [],
-      gastosCompartidos: [
-        { id: 1, descripcion: 'Alquiler', monto: 150000, mes: '2026-10' },
-        { id: 2, descripcion: 'Expensas', monto: 30000, mes: '2026-10' }
-      ],
-      tarjetas: [
-        { id: 1, nombre: 'NACION - VISA', titular: 'Catriel' },
-        { id: 2, nombre: 'NACION - Mastercard', titular: 'Lisandro' }
-      ],
-      consumosTarjetas: [],
-      prestamos: []
-    };
+  const [data, setData] = useState({
+    ingresos: [],
+    ahorros: [],
+    gastosLisandro: [],
+    gastosCatriel: [],
+    gastosCompartidos: [],
+    tarjetas: [
+      { id: 1, nombre: 'NACION - VISA', titular: 'Catriel' },
+      { id: 2, nombre: 'NACION - Mastercard', titular: 'Lisandro' }
+    ],
+    consumosTarjetas: [],
+    prestamos: []
   });
 
   const [itemEditando, setItemEditando] = useState(null);
 
-  // Forms
+  // Formularios
   const [usuarioConsumo, setUsuarioConsumo] = useState('Catriel');
   const [nuevoConsumo, setNuevoConsumo] = useState({ tarjetaId: '', descripcion: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 1, quienPaga: 'Catriel', pagadorOtroTexto: '' });
   const [nuevoIngreso, setNuevoIngreso] = useState({ usuario: 'Catriel', monto: '', descripcion: '' });
@@ -45,19 +30,67 @@ export default function App() {
   const [nuevaTarjeta, setNuevaTarjeta] = useState({ nombre: '', titular: 'Catriel' });
   const [nuevoPrestamo, setNuevoPrestamo] = useState({ entidad: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 12, quienPaga: 'Compartido', pagadorOtroTexto: '' });
 
-  // Guardar en localStorage
+  // 1. CARGAR DATOS DESDE SUPABASE AL INICIAR Y ESCUCHAR CAMBIOS EN TIEMPO REAL
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  }, [data]);
+    async function obtenerDatos() {
+      try {
+        const { data: res, error } = await supabase
+          .from('finanzas')
+          .select('content')
+          .eq('key', 'datos_hogar')
+          .single();
 
-  // COPIA DE SEGURIDAD INDEPENDIENTE AL CAMBIAR DE MES
+        if (error && error.code !== 'PGRST116') {
+          console.error('Error al cargar datos:', error);
+        } else if (res && res.content && Object.keys(res.content).length > 0) {
+          setData(res.content);
+        }
+      } catch (e) {
+        console.error('Error de conexión:', e);
+      } finally {
+        setCargando(false);
+      }
+    }
+
+    obtenerDatos();
+
+    // Suscripción en tiempo real a cambios de otros dispositivos
+    const channel = supabase
+      .channel('cambios-finanzas')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'finanzas' }, payload => {
+        if (payload.new && payload.new.content) {
+          setData(payload.new.content);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // 2. GUARDAR EN SUPABASE EN CADA MODIFICACIÓN
+  const guardarEnNube = async (nuevosDatos) => {
+    setData(nuevosDatos);
+    try {
+      const { error } = await supabase
+        .from('finanzas')
+        .upsert({ key: 'datos_hogar', content: nuevosDatos }, { onConflict: 'key' });
+
+      if (error) console.error('Error al guardar en Supabase:', error);
+    } catch (e) {
+      console.error('Error al guardar:', e);
+    }
+  };
+
+  // AUTO-CLONAR GASTOS COMPARTIDOS DEL MES ANTERIOR AL CAMBIAR DE MES
   useEffect(() => {
+    if (cargando) return;
+
     const gastosComp = data.gastosCompartidos || [];
     const hayGastosEnMesActual = gastosComp.some(g => g.mes === mesSeleccionado);
 
-    // Si el mes está totalmente vacío, busca los datos del mes anterior y los clona
     if (!hayGastosEnMesActual && gastosComp.length > 0) {
-      // Obtener meses únicos ordenados
       const mesesExistentes = Array.from(new Set(gastosComp.map(g => g.mes))).sort();
       const mesesAnteriores = mesesExistentes.filter(m => m < mesSeleccionado);
 
@@ -69,16 +102,16 @@ export default function App() {
           id: Date.now() + idx,
           descripcion: g.descripcion,
           monto: g.monto,
-          mes: mesSeleccionado // Asigna el mes nuevo pero NO altera el viejo
+          mes: mesSeleccionado
         }));
 
-        setData(prev => ({
-          ...prev,
-          gastosCompartidos: [...(prev.gastosCompartidos || []), ...gastosClonados]
-        }));
+        guardarEnNube({
+          ...data,
+          gastosCompartidos: [...gastosComp, ...gastosClonados]
+        });
       }
     }
-  }, [mesSeleccionado]);
+  }, [mesSeleccionado, cargando]);
 
   const formatoMoneda = (val) => new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(val || 0);
 
@@ -94,21 +127,21 @@ export default function App() {
     e.preventDefault();
     if (!nuevoIngreso.monto || !nuevoIngreso.descripcion) return;
     const item = { id: Date.now(), usuario: nuevoIngreso.usuario, monto: parseFloat(nuevoIngreso.monto), descripcion: nuevoIngreso.descripcion, mes: mesSeleccionado };
-    setData({ ...data, ingresos: [...(data.ingresos || []), item] });
+    guardarEnNube({ ...data, ingresos: [...(data.ingresos || []), item] });
     setNuevoIngreso({ ...nuevoIngreso, monto: '', descripcion: '' });
   };
 
   const guardarAhorro = (usuario, monto) => {
     const otrosAhorros = (data.ahorros || []).filter(a => !(a.usuario === usuario && a.mes === mesSeleccionado));
     const nuevo = { id: Date.now(), usuario, monto: parseFloat(monto) || 0, mes: mesSeleccionado };
-    setData({ ...data, ahorros: [...otrosAhorros, nuevo] });
+    guardarEnNube({ ...data, ahorros: [...otrosAhorros, nuevo] });
   };
 
   const agregarGastoCompartido = (e) => {
     e.preventDefault();
     if (!nuevoGastoCompartido.monto || !nuevoGastoCompartido.descripcion) return;
     const nuevoGasto = { id: Date.now(), descripcion: nuevoGastoCompartido.descripcion, monto: parseFloat(nuevoGastoCompartido.monto), mes: mesSeleccionado };
-    setData({ ...data, gastosCompartidos: [...(data.gastosCompartidos || []), nuevoGasto] });
+    guardarEnNube({ ...data, gastosCompartidos: [...(data.gastosCompartidos || []), nuevoGasto] });
     setNuevoGastoCompartido({ descripcion: '', monto: '' });
   };
 
@@ -117,9 +150,9 @@ export default function App() {
     if (!nuevoGastoInd.monto || !nuevoGastoInd.descripcion) return;
     const item = { id: Date.now(), descripcion: nuevoGastoInd.descripcion, monto: parseFloat(nuevoGastoInd.monto), mes: mesSeleccionado };
     if (nuevoGastoInd.usuario === 'Catriel') {
-      setData({ ...data, gastosCatriel: [...(data.gastosCatriel || []), item] });
+      guardarEnNube({ ...data, gastosCatriel: [...(data.gastosCatriel || []), item] });
     } else {
-      setData({ ...data, gastosLisandro: [...(data.gastosLisandro || []), item] });
+      guardarEnNube({ ...data, gastosLisandro: [...(data.gastosLisandro || []), item] });
     }
     setNuevoGastoInd({ ...nuevoGastoInd, monto: '', descripcion: '' });
   };
@@ -128,7 +161,7 @@ export default function App() {
     e.preventDefault();
     if (!nuevaTarjeta.nombre.trim()) return;
     const nueva = { id: Date.now(), nombre: nuevaTarjeta.nombre, titular: nuevaTarjeta.titular };
-    setData({ ...data, tarjetas: [...(data.tarjetas || []), nueva] });
+    guardarEnNube({ ...data, tarjetas: [...(data.tarjetas || []), nueva] });
     setNuevaTarjeta({ nombre: '', titular: 'Catriel' });
   };
 
@@ -146,7 +179,7 @@ export default function App() {
       quienPaga: nuevoConsumo.quienPaga,
       pagadorDetalle: nuevoConsumo.quienPaga === 'Otro' ? nuevoConsumo.pagadorOtroTexto : ''
     };
-    setData({ ...data, consumosTarjetas: [...(data.consumosTarjetas || []), consumo] });
+    guardarEnNube({ ...data, consumosTarjetas: [...(data.consumosTarjetas || []), consumo] });
     setNuevoConsumo({ tarjetaId: '', descripcion: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 1, quienPaga: 'Catriel', pagadorOtroTexto: '' });
   };
 
@@ -163,20 +196,20 @@ export default function App() {
       quienPaga: nuevoPrestamo.quienPaga,
       pagadorDetalle: nuevoPrestamo.quienPaga === 'Otro' ? nuevoPrestamo.pagadorOtroTexto : ''
     };
-    setData({ ...data, prestamos: [...(data.prestamos || []), p] });
+    guardarEnNube({ ...data, prestamos: [...(data.prestamos || []), p] });
     setNuevoPrestamo({ entidad: '', montoCuota: '', cuotaActual: 1, cuotasTotales: 12, quienPaga: 'Compartido', pagadorOtroTexto: '' });
   };
 
   const eliminarItem = (coleccion, id) => {
     if (window.confirm('¿Seguro que querés borrar este registro?')) {
       if (coleccion === 'tarjetas') {
-        setData({
+        guardarEnNube({
           ...data,
           tarjetas: (data.tarjetas || []).filter(t => t.id !== id),
           consumosTarjetas: (data.consumosTarjetas || []).filter(c => c.tarjetaId !== id)
         });
       } else {
-        setData({
+        guardarEnNube({
           ...data,
           [coleccion]: (data[coleccion] || []).filter(i => i.id !== id)
         });
@@ -187,7 +220,7 @@ export default function App() {
   const guardarEdicion = (e) => {
     e.preventDefault();
     const { tipo, item } = itemEditando;
-    setData({
+    guardarEnNube({
       ...data,
       [tipo]: (data[tipo] || []).map(i => i.id === item.id ? item : i)
     });
@@ -250,7 +283,6 @@ export default function App() {
   const tarjetasLisandro = (data.tarjetas || []).filter(t => t.titular === 'Lisandro');
   const tarjetasDelUsuarioActual = (data.tarjetas || []).filter(t => t.titular === usuarioConsumo);
 
-  // DETALLE TARJETAS COMPARTIDAS
   const consumosTarjetasCompartidosLisandro = tarjetasLisandro.reduce((total, t) => {
     const consumos = obtenerConsumosActivosPorMes(t.id).filter(c => c.quienPaga === 'Compartido');
     return total + consumos.reduce((a, b) => a + b.montoCuota, 0);
@@ -267,7 +299,6 @@ export default function App() {
   const diferenciaTarjetas = consumosTarjetasCompartidosCatriel - consumosTarjetasCompartidosLisandro;
   const montoAjusteTarjetas = Math.abs(diferenciaTarjetas) / 2;
 
-  // DESGLOSE CARGO JUSTO PROPIO
   const obtenerDesgloseExclusivoPorTarjeta = (usuario) => {
     const desglose = [];
     (data.tarjetas || []).forEach(t => {
@@ -318,7 +349,6 @@ export default function App() {
   const pagoBalanceTarjetasCatriel = calcularPagoRealTarjetasBalance('Catriel');
   const pagoBalanceTarjetasLisandro = calcularPagoRealTarjetasBalance('Lisandro');
 
-  // DEUDORES / TERCEROS
   const obtenerCobrosTerceros = (titularBuscado) => {
     const deudores = {};
     const tarjetasDelTitular = (data.tarjetas || []).filter(t => t.titular === titularBuscado);
@@ -339,7 +369,6 @@ export default function App() {
   const deudoresCatriel = obtenerCobrosTerceros('Catriel');
   const deudoresLisandro = obtenerCobrosTerceros('Lisandro');
 
-  // COMBUSTIBLE
   const obtenerCombustibleUsuario = (usuario) => {
     let total = 0;
     (data.tarjetas || []).forEach(t => {
@@ -367,12 +396,19 @@ export default function App() {
   const totalPrestamosPropioCatriel = prestamosCatriel.reduce((a, b) => a + b.montoCuota, 0);
   const totalPrestamosPropioLisandro = prestamosLisandro.reduce((a, b) => a + b.montoCuota, 0);
 
-  // RESUMEN Y BALANCE NETO
   const gastosTotalesCatriel = totalIndCatriel + pagoBalanceTarjetasCatriel + cuotaCompartidaIndividual + (totalPrestamosCompartidos / 2) + totalPrestamosPropioCatriel;
   const gastosTotalesLisandro = totalIndLisandro + pagoBalanceTarjetasLisandro + cuotaCompartidaIndividual + (totalPrestamosCompartidos / 2) + totalPrestamosPropioLisandro;
 
   const disponibleCatriel = totalIngresosCatriel - gastosTotalesCatriel - ahorroCatriel;
   const disponibleLisandro = totalIngresosLisandro - gastosTotalesLisandro - ahorroLisandro;
+
+  if (cargando) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', fontFamily: 'sans-serif', backgroundColor: '#f1f5f9' }}>
+        <h2>🔄 Conectando con la base de datos compartida...</h2>
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily: 'system-ui, -apple-system, sans-serif', backgroundColor: '#f1f5f9', minHeight: '100vh', padding: '20px' }}>
@@ -381,7 +417,7 @@ export default function App() {
       <header style={{ maxWidth: '1400px', margin: '0 auto 24px auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px', backgroundColor: '#ffffff', padding: '16px 24px', borderRadius: '16px', border: '1px solid #e2e8f0' }}>
         <div>
           <h1 style={{ margin: 0, color: '#0f172a', fontSize: '24px' }}>🏡 Dashboard Financiero del Hogar</h1>
-          <p style={{ margin: '4px 0 0 0', color: '#64748b', fontSize: '14px' }}>Vista Dividida: Lisandro (Izq) | Compartido (Centro) | Catriel (Der)</p>
+          <p style={{ margin: '4px 0 0 0', color: '#16a34a', fontSize: '13px', fontWeight: 'bold' }}>🟢 Sincronización en vivo activa</p>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: '#f8fafc', padding: '8px 16px', borderRadius: '12px', border: '1px solid #cbd5e1' }}>
@@ -398,7 +434,7 @@ export default function App() {
       {/* TRES COLUMNAS PRINCIPALES */}
       <div style={{ maxWidth: '1400px', margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '20px', alignItems: 'start' }}>
 
-        {/* ================= COLUMNA 1: LISANDRO ================= */}
+        {/* COLUMNA 1: LISANDRO */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div style={{ backgroundColor: '#e0f2fe', border: '2px solid #38bdf8', borderRadius: '16px', padding: '16px' }}>
             <h2 style={{ margin: '0 0 12px 0', color: '#0369a1', fontSize: '20px' }}>👤 LISANDRO</h2>
@@ -528,10 +564,8 @@ export default function App() {
           )}
         </div>
 
-        {/* ================= COLUMNA 2: CENTRO ================= */}
+        {/* COLUMNA 2: CENTRO */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          
-          {/* GASTOS COMPARTIDOS */}
           <div style={{ backgroundColor: '#fef3c7', border: '2px solid #f59e0b', borderRadius: '16px', padding: '16px' }}>
             <h2 style={{ margin: '0 0 12px 0', color: '#b45309', fontSize: '20px', textAlign: 'center' }}>🤝 GASTOS COMPARTIDOS (50 / 50)</h2>
 
@@ -571,7 +605,6 @@ export default function App() {
             </form>
           </div>
 
-          {/* GASTOS TARJETAS COMPARTIDOS */}
           <div style={{ backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '16px' }}>
             <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '16px', borderBottom: '2px solid #f1f5f9', paddingBottom: '8px' }}>
               💳 Gastos Tarjetas Compartidos
@@ -630,14 +663,12 @@ export default function App() {
             </div>
           </div>
 
-          {/* RECUADRO CARGO JUSTO */}
           <div style={{ backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '16px' }}>
             <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '15px', borderBottom: '2px solid #f1f5f9', paddingBottom: '8px' }}>
               📊 Cargo Justo de Tarjetas (Solo Gastos Propios)
             </h3>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-              
               <div style={{ backgroundColor: '#f0f9ff', padding: '10px', borderRadius: '8px', border: '1px solid #bae6fd', fontSize: '12px' }}>
                 <span style={{ fontSize: '11px', fontWeight: 'bold', color: '#0369a1' }}>LISANDRO (PROPIO)</span>
                 <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0284c7', margin: '4px 0 8px 0' }}>
@@ -685,11 +716,9 @@ export default function App() {
                   ))
                 )}
               </div>
-
             </div>
           </div>
 
-          {/* COMBUSTIBLE */}
           <div style={{ backgroundColor: '#ffffff', border: '2px solid #fdba74', borderRadius: '16px', padding: '16px' }}>
             <h3 style={{ margin: '0 0 12px 0', color: '#c2410c', fontSize: '16px', display: 'flex', alignItems: 'center', gap: '6px' }}>
               ⛽ GASTOS DE COMBUSTIBLE
@@ -711,7 +740,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* PRÉSTAMOS COMPARTIDOS */}
           {prestamosCompartidos.length > 0 && (
             <div style={{ backgroundColor: '#ffffff', borderRadius: '16px', padding: '16px', border: '2px solid #a855f7' }}>
               <h3 style={{ margin: '0 0 12px 0', color: '#6b21a8', fontSize: '15px', textAlign: 'center' }}>🏦 Préstamos Compartidos (50/50)</h3>
@@ -734,7 +762,6 @@ export default function App() {
             </div>
           )}
 
-          {/* BALANCE FINAL */}
           <div style={{ backgroundColor: '#ffffff', border: '2px solid #0f172a', borderRadius: '16px', padding: '16px' }}>
             <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '16px', textAlign: 'center' }}>
               💰 BALANCE NETO DEL MES
@@ -764,10 +791,9 @@ export default function App() {
               </div>
             </div>
           </div>
-
         </div>
 
-        {/* ================= COLUMNA 3: CATRIEL ================= */}
+        {/* COLUMNA 3: CATRIEL */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div style={{ backgroundColor: '#f0fdf4', border: '2px solid #4ade80', borderRadius: '16px', padding: '16px' }}>
             <h2 style={{ margin: '0 0 12px 0', color: '#15803d', fontSize: '20px' }}>👤 CATRIEL</h2>
@@ -811,7 +837,7 @@ export default function App() {
                   <span>{g.descripcion}</span>
                   <div>
                     <strong style={{ marginRight: '8px' }}>{formatoMoneda(g.monto)}</strong>
-                    <button onClick={() => setItemEditando({ tipo: 'gastosCatriel', item: g })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️️</button>
+                    <button onClick={() => setItemEditando({ tipo: 'gastosCatriel', item: g })} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>✏️</button>
                     <button onClick={() => eliminarItem('gastosCatriel', g.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}>🗑️</button>
                   </div>
                 </div>
@@ -899,8 +925,7 @@ export default function App() {
 
       </div>
 
-
-      {/* ================= SECCIÓN INFERIOR: FORMULARIOS ================= */}
+      {/* FORMULARIOS */}
       <div style={{ maxWidth: '1400px', margin: '32px auto 0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
         
         <section style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '16px', border: '2px solid #a855f7' }}>
